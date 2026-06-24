@@ -20,6 +20,8 @@ Educational objective:
 #ifndef STRING_H
 #define STRING_H
 
+#define NULL ((void*)0)
+
 long my_strlen(
     const char *str
 );

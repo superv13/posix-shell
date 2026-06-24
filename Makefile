@@ -22,6 +22,10 @@
 #        ↓
 #   wrappers.c
 #        ↓
+#   parser/tokenizer.c
+#        ↓
+#   parser/parser.c
+#        ↓
 #   linker
 #        ↓
 #   posixsh
@@ -62,7 +66,9 @@ runtime/start.c \
 shell/shell_loop.c \
 kernel/wrappers.c \
 utils/string.c \
-builtins/builtins.c
+builtins/builtins.c \
+parser/tokenizer.c \
+parser/parser.c
 
 #------------------------------------------------------------------------------
 # Build target
