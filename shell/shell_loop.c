@@ -65,15 +65,6 @@ void shell_main(void)
 
         buffer[bytes] = '\0';           /* Null-terminate the raw input */
 
-        /* ── Quick exit check ──────────────────────────────────────────── */
-        /*
-         * execute_builtin() currently handles only "exit\n".
-         * Returns 1 to break the loop, 0 to continue.
-         * Full builtin handling moves to the executor in Phase 3.
-         */
-        if (execute_builtin(buffer)) {
-            break;
-        }
 
         /* ── Tokenise ──────────────────────────────────────────────────── */
         Token tokens[MAX_TOKENS];
@@ -92,6 +83,20 @@ void shell_main(void)
             char err[] = "posixsh: syntax error\n";
             sys_write(2, err, my_strlen(err));
             continue;
+        }
+
+        /*
+        * Execute builtin commands.
+        *
+        * Builtins execute inside the shell process and therefore bypass
+        * the external command executor.
+        */
+        if (pipeline.count == 1)
+        {
+            if (execute_builtin(&pipeline.commands[0]))
+            {
+                continue;
+            }
         }
 
         /* ── Phase 2 debug output ──────────────────────────────────────── */
@@ -150,6 +155,6 @@ void shell_main(void)
             }
         }
 
-        /* Phase 3: replace the debug block above with:  execute(&pipeline); */
-    }
+        /* Phase 3: replace the debug block above with:  execute(&pipeline); */       
+}
 }

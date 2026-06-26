@@ -77,4 +77,49 @@ void sys_exit(
     int status
 );
 
+/*
+===============================================================================
+SYSTEM CALL: sys_getcwd
+
+Purpose:
+    Returns the absolute pathname of the current working directory.
+
+Parameters:
+    buffer : Destination buffer.
+    size   : Size of the destination buffer.
+
+Returns:
+    >=0 : Number of bytes written.
+     <0 : Linux error code.
+
+===============================================================================
+*/
+
+long sys_getcwd(
+    char *buffer,
+    long size
+);
+
+
+/*
+===============================================================================
+SYSTEM CALL: sys_chdir
+
+Purpose:
+    Changes the current working directory.
+
+Parameters:
+    path : Target directory.
+
+Returns:
+     0 : Success.
+    <0 : Linux error code.
+
+===============================================================================
+*/
+
+long sys_chdir(
+    const char *path
+);
+
 #endif

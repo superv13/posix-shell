@@ -151,3 +151,48 @@ void sys_exit(int status)
 
     while(1);
 }
+
+//=============================================================================
+// SYSTEM CALL: sys_getcwd
+//
+// Purpose:
+//   Provides a thin wrapper around the Linux getcwd() system call.
+//
+//=============================================================================
+
+long sys_getcwd(
+    char *buffer,
+    long size
+)
+{
+    return syscall2(
+        SYS_getcwd,
+        (long)buffer,
+        size
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_chdir
+//
+// Purpose:
+//   Provides a thin wrapper around the Linux chdir() system call.
+//
+// Parameters:
+//   path : Path of the target directory.
+//
+// Returns:
+//    0 : Success.
+//   <0 : Linux error code.
+//
+//=============================================================================
+
+long sys_chdir(
+    const char *path
+)
+{
+    return syscall1(
+        SYS_chdir,
+        (long)path
+    );
+}

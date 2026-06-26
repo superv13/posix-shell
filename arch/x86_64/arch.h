@@ -60,6 +60,10 @@ Educational objective:
 #define SYS_rt_sigaction 13
 #define SYS_setpgid   109
 
+/* Directory */
+
+#define SYS_getcwd    79
+#define SYS_chdir     80
 
 /*===========================================================================
  Linux x86_64 syscall ABI

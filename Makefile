@@ -67,6 +67,9 @@ shell/shell_loop.c \
 kernel/wrappers.c \
 utils/string.c \
 builtins/builtins.c \
+builtins/exit.c \
+builtins/pwd.c \
+builtins/cd.c \
 parser/tokenizer.c \
 parser/parser.c
 
