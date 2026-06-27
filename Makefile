@@ -71,6 +71,8 @@ builtins/exit.c \
 builtins/pwd.c \
 builtins/cd.c \
 parser/tokenizer.c \
+executor/executor.c \
+executor/path.c \
 parser/parser.c
 
 #------------------------------------------------------------------------------

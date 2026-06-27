@@ -5,7 +5,7 @@
 #include "../builtins/builtins.h"
 #include "../parser/tokenizer.h"
 #include "../parser/parser.h"
-
+#include "../executor/executor.h"
 /*
 ===============================================================================
 shell_loop.c
@@ -109,6 +109,10 @@ void shell_main(void)
             continue;                   /* Empty input — show prompt again */
         }
 
+        execute_pipeline(
+            &pipeline
+        );
+
         /* Print background flag */
         if (pipeline.background) {
             char bg_msg[] = "[background]\n";
@@ -155,6 +159,6 @@ void shell_main(void)
             }
         }
 
-        /* Phase 3: replace the debug block above with:  execute(&pipeline); */       
-}
+        /* Phase 3: replace the debug block above with:  execute(&pipeline); */ 
+   }
 }

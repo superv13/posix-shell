@@ -65,6 +65,14 @@ Educational objective:
 #define SYS_getcwd    79
 #define SYS_chdir     80
 
+/* Process */
+
+#define SYS_fork      57
+#define SYS_execve    59
+#define SYS_exit      60
+#define SYS_wait4     61
+
+
 /*===========================================================================
  Linux x86_64 syscall ABI
 
@@ -188,6 +196,38 @@ long syscall3(
         : "rcx",
           "r11",
           "memory"
+    );
+
+    return ret;
+}
+
+/*4 arguments*/
+
+static inline __attribute__((always_inline))
+long syscall4(
+    long number,
+    long arg1,
+    long arg2,
+    long arg3,
+    long arg4
+)
+{
+    long ret;
+
+    register long r10 __asm__("r10") = arg4;
+
+    __asm__ volatile(
+        "syscall"
+
+        : "=a"(ret)
+
+        : "a"(number),
+          "D"(arg1),
+          "S"(arg2),
+          "d"(arg3),
+          "r"(r10)
+
+        : "rcx", "r11", "memory"
     );
 
     return ret;

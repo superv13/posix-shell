@@ -196,3 +196,108 @@ long sys_chdir(
         (long)path
     );
 }
+
+//=============================================================================
+// SYSTEM CALL: sys_fork
+//
+// Purpose:
+//   Provides a thin wrapper around the Linux fork() system call.
+//
+// Returns:
+//    0 : Child process.
+//   >0 : Parent process (child PID).
+//   <0 : Linux error code.
+//
+//=============================================================================
+
+long sys_fork(void)
+{
+    return syscall0(
+        SYS_fork
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_execve
+//
+// Purpose:
+//   Thin wrapper around Linux execve().
+//
+//=============================================================================
+
+long sys_execve(
+    const char *pathname,
+    char *const argv[],
+    char *const envp[]
+)
+{
+    return syscall3(
+        SYS_execve,
+        (long)pathname,
+        (long)argv,
+        (long)envp
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_wait4
+//
+// Purpose:
+//   Provides a thin wrapper around the Linux wait4() system call.
+//
+//=============================================================================
+
+long sys_wait4(
+    long pid,
+    int *status,
+    int options
+)
+{
+    return syscall4(
+        SYS_wait4,
+        pid,
+        (long)status,
+        options,
+        0          /* struct rusage * = NULL */
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_open
+//
+// Purpose:
+//   Thin wrapper around the Linux open() system call.
+//
+//=============================================================================
+
+long sys_open(
+    const char *pathname,
+    int flags,
+    int mode
+)
+{
+    return syscall3(
+        SYS_open,
+        (long)pathname,
+        (long)flags,
+        (long)mode
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_close
+//
+// Purpose:
+//   Thin wrapper around the Linux close() system call.
+//
+//=============================================================================
+
+long sys_close(
+    long fd
+)
+{
+    return syscall1(
+        SYS_close,
+        fd
+    );
+}

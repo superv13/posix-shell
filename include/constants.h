@@ -7,5 +7,6 @@
 #define MAX_PIPELINE_DEPTH     8   /* Max commands connected by pipes */
 #define MAX_TOKEN_LEN        256   /* Max character length of one token */
 #define MAX_FILENAME_LEN     256   /* Max character length of redirect filename */
+#define MAX_PATH_LEN         256
 
 #endif

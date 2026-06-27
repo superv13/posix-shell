@@ -1,3 +1,5 @@
+---my terminal output of first phase---
+
 umma@vumma-VivoBook-15-ASUS-Laptop-X507UF:~/Desktop/POSIX$ make
 gcc -nostdlib -static -ffreestanding -Wall runtime/start.c shell/shell_loop.c kernel/wrappers.c -o posixsh
 vumma@vumma-VivoBook-15-ASUS-Laptop-X507UF:~/Desktop/POSIX$ ./posixsh

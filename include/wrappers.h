@@ -123,3 +123,141 @@ long sys_chdir(
 );
 
 #endif
+
+/*
+===============================================================================
+SYSTEM CALL: sys_fork
+
+Purpose:
+    Creates a new child process by duplicating the calling process.
+
+Why this wrapper exists:
+    The educational POSIX shell avoids libc and invokes Linux system calls
+    directly. This wrapper provides a clean interface between shell logic
+    and the architecture-specific syscall layer.
+
+Returns:
+     0 : Returned in the child process.
+    >0 : Child process ID (PID) returned in the parent process.
+    <0 : Linux error code.
+
+Educational note:
+    Both parent and child continue execution from the instruction
+    immediately following sys_fork(). The return value distinguishes
+    between the two processes.
+
+===============================================================================
+*/
+
+long sys_fork(void);
+
+
+/*
+===============================================================================
+SYSTEM CALL: sys_execve
+
+Purpose:
+    Replaces the current process image with a new executable.
+
+Parameters:
+    pathname : Path of the executable.
+    argv     : Argument vector.
+    envp     : Environment variables.
+
+Returns:
+    Never returns on success.
+
+    <0 on failure.
+
+Educational note:
+    On success, execution never returns to the caller because the current
+    process image is completely replaced by the new program.
+
+===============================================================================
+*/
+
+long sys_execve(
+    const char *pathname,
+    char *const argv[],
+    char *const envp[]
+);
+
+/*
+===============================================================================
+SYSTEM CALL: sys_wait4
+
+Purpose:
+    Waits for a child process to terminate.
+
+Why this wrapper exists:
+    The educational POSIX shell invokes the Linux wait4() system call directly
+    without relying on libc.
+
+Parameters:
+    pid     : Child process ID to wait for.
+    status  : Pointer to receive the child's exit status.
+    options : Wait options (normally 0).
+
+Returns:
+    >0 : PID of the terminated child.
+    <0 : Linux error code.
+
+Educational note:
+    This wrapper is used by the shell to wait for foreground commands before
+    displaying the next prompt.
+
+===============================================================================
+*/
+
+long sys_wait4(
+    long pid,
+    int *status,
+    int options
+);
+
+/*
+===============================================================================
+SYSTEM CALL: sys_open
+
+Purpose:
+    Opens a file and returns a file descriptor.
+
+Parameters:
+    pathname : Path to the file.
+    flags    : Open flags.
+    mode     : File permissions when creating a file.
+
+Returns:
+    >=0 : File descriptor.
+     <0 : Linux error code.
+
+===============================================================================
+*/
+
+long sys_open(
+    const char *pathname,
+    int flags,
+    int mode
+);
+
+
+/*
+===============================================================================
+SYSTEM CALL: sys_close
+
+Purpose:
+    Closes an open file descriptor.
+
+Parameters:
+    fd : File descriptor.
+
+Returns:
+     0 : Success.
+    <0 : Linux error code.
+
+===============================================================================
+*/
+
+long sys_close(
+    long fd
+);
