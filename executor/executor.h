@@ -68,14 +68,15 @@ Returns:
      0 : Success.
     -1 : Execution error.
 
-Current implementation:
-    Executes a single foreground command.
+Current implementation (Phase 3):
+    - N-stage pipelines ("a | b | c")
+    - Input/output redirection ("<", ">", ">>")
+    - Background execution ("cmd &")
+    - PATH-resolved external commands and in-pipeline builtins
 
 Future extensions:
-    - Pipelines
-    - Input/output redirection
-    - Background execution
-    - Job control
+    - Job table / job control (fg, bg, jobs) -- Phase 4
+    - Signal handling, process groups -- Phase 4
 
 ===============================================================================
 */

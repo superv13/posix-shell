@@ -122,8 +122,6 @@ long sys_chdir(
     const char *path
 );
 
-#endif
-
 /*
 ===============================================================================
 SYSTEM CALL: sys_fork
@@ -261,3 +259,68 @@ Returns:
 long sys_close(
     long fd
 );
+
+/*
+===============================================================================
+SYSTEM CALL: sys_pipe
+
+Purpose:
+    Creates a unidirectional data channel (a pipe) that can be used for
+    interprocess communication.
+
+Why this wrapper exists:
+    Pipeline construction ("cmd1 | cmd2") requires connecting the stdout of
+    one process to the stdin of the next. The kernel pipe() syscall creates
+    a pair of connected file descriptors for exactly this purpose.
+
+Parameters:
+    pipefd : Caller-provided array of 2 ints. On success:
+                 pipefd[0] -> read end
+                 pipefd[1] -> write end
+
+Returns:
+     0 : Success.
+    <0 : Linux error code.
+
+Educational note:
+    Both ends must eventually be dup2()'d into place (stdin/stdout) and the
+    originals closed, or file descriptors leak and pipes never reach EOF.
+
+===============================================================================
+*/
+
+long sys_pipe(
+    int pipefd[2]
+);
+
+/*
+===============================================================================
+SYSTEM CALL: sys_dup2
+
+Purpose:
+    Duplicates a file descriptor onto a specific, chosen descriptor number,
+    closing the target first if it was already open.
+
+Why this wrapper exists:
+    Redirection ("cmd > file") and pipelines both work by making file
+    descriptor 0 (stdin) or 1 (stdout) point at something other than the
+    terminal, *before* execve() replaces the process image. dup2() is the
+    standard mechanism for this.
+
+Parameters:
+    oldfd : Existing, open file descriptor.
+    newfd : Target descriptor number (usually 0 or 1).
+
+Returns:
+    >=0 : newfd on success.
+     <0 : Linux error code.
+
+===============================================================================
+*/
+
+long sys_dup2(
+    long oldfd,
+    long newfd
+);
+
+#endif

@@ -301,3 +301,65 @@ long sys_close(
         fd
     );
 }
+
+//=============================================================================
+// SYSTEM CALL: sys_pipe
+//
+// Purpose:
+//   Thin wrapper around the Linux pipe() system call.
+//
+// Kernel interaction:
+//   pipe(pipefd)
+//
+// x86-64 syscall convention:
+//   rax = syscall number (22)
+//   rdi = pipefd (pointer to int[2])
+//
+// Educational note:
+//   The kernel writes the read-end fd into pipefd[0] and the write-end fd
+//   into pipefd[1]. Unlike pipe2(), there are no flags here.
+//
+//=============================================================================
+
+long sys_pipe(
+    int pipefd[2]
+)
+{
+    return syscall1(
+        SYS_pipe,
+        (long)pipefd
+    );
+}
+
+//=============================================================================
+// SYSTEM CALL: sys_dup2
+//
+// Purpose:
+//   Thin wrapper around the Linux dup2() system call.
+//
+// Kernel interaction:
+//   dup2(oldfd, newfd)
+//
+// x86-64 syscall convention:
+//   rax = syscall number (33)
+//   rdi = oldfd
+//   rsi = newfd
+//
+// Educational note:
+//   If newfd is already open, the kernel closes it first, atomically,
+//   before reusing the number. This atomicity is exactly why dup2() (and
+//   not close()+open()) is the correct tool for redirection.
+//
+//=============================================================================
+
+long sys_dup2(
+    long oldfd,
+    long newfd
+)
+{
+    return syscall2(
+        SYS_dup2,
+        oldfd,
+        newfd
+    );
+}

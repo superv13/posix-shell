@@ -29,12 +29,13 @@ Execution flow:
           ↓
       execute()          → Phase 3 (not yet implemented)
 
-Current Phase 2 behaviour:
+Current Phase 3 behaviour:
     - Reads input
     - Tokenises it
     - Parses it into a Pipeline struct
-    - Prints a debug summary of what was parsed
-    - Does NOT yet execute anything (Phase 3)
+    - Dispatches single-command builtins (cd/pwd/exit) directly
+    - Hands everything else to execute_pipeline(): pipes, redirection,
+      background jobs, and external commands via fork()/execve()/wait4()
 
 ===============================================================================
 */
@@ -112,53 +113,5 @@ void shell_main(void)
         execute_pipeline(
             &pipeline
         );
-
-        /* Print background flag */
-        if (pipeline.background) {
-            char bg_msg[] = "[background]\n";
-            sys_write(1, bg_msg, my_strlen(bg_msg));
-        }
-
-        /* Print each command */
-        for (int i = 0; i < pipeline.count; i++) {
-            Command *cmd = &pipeline.commands[i];
-
-            /* Command index */
-            char cmd_label[] = "CMD[x]: ";
-            cmd_label[4] = '0' + i;
-            sys_write(1, cmd_label, my_strlen(cmd_label));
-
-            /* All arguments */
-            for (int j = 0; j < cmd->argc; j++) {
-                sys_write(1, cmd->argv[j], my_strlen(cmd->argv[j]));
-                if (j < cmd->argc - 1) sys_write(1, " ", 1);
-            }
-            sys_write(1, "\n", 1);
-
-            /* Input redirect */
-            if (cmd->input_file[0] != '\0') {
-                char in_label[] = "  stdin  < ";
-                sys_write(1, in_label, my_strlen(in_label));
-                sys_write(1, cmd->input_file, my_strlen(cmd->input_file));
-                sys_write(1, "\n", 1);
-            }
-
-            /* Output redirect */
-            if (cmd->output_file[0] != '\0') {
-                char out_label[] = "  stdout > ";
-                if (cmd->append) out_label[9] = '>';   /* show >> */
-                sys_write(1, out_label, my_strlen(out_label));
-                sys_write(1, cmd->output_file, my_strlen(cmd->output_file));
-                sys_write(1, "\n", 1);
-            }
-
-            /* Builtin flag */
-            if (cmd->is_builtin) {
-                char bi_label[] = "  [builtin]\n";
-                sys_write(1, bi_label, my_strlen(bi_label));
-            }
-        }
-
-        /* Phase 3: replace the debug block above with:  execute(&pipeline); */ 
-   }
+    }
 }
