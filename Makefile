@@ -1,83 +1,38 @@
 #==============================================================================
-# Makefile
+# Makefile — Educational POSIX Shell (Phase 4)
 #
-# Purpose:
-#   Builds the educational POSIX shell without any dependency on libc.
-#
-# Why this file exists:
-#   A normal GCC build automatically links:
-#
-#       crt0.o
-#       libc
-#       startup objects
-#
-#   This project deliberately disables them to expose the complete
-#   execution path between the Linux kernel and the shell.
-#
-# Build flow:
-#
-#   start.c
-#        ↓
-#   shell_loop.c
-#        ↓
-#   wrappers.c
-#        ↓
-#   parser/tokenizer.c
-#        ↓
-#   parser/parser.c
-#        ↓
-#   linker
-#        ↓
-#   posixsh
-#
+# Build flags:
+#   -nostdlib       do not link libc or standard startup files
+#   -static         produce a self-contained binary
+#   -ffreestanding  no hosted-environment assumptions
+#   -Wall           enable common warnings
 #==============================================================================
 
-CC = gcc
-
-#------------------------------------------------------------------------------
-# Compiler flags
-#
-# -nostdlib
-#   Do not link the standard C runtime or libc.
-#
-# -static
-#   Produce a self-contained executable with no shared library dependencies.
-#
-# -ffreestanding
-#   Inform the compiler that this program does not execute inside a hosted
-#   environment and cannot assume the existence of libc facilities.
-#
-# -Wall
-#   Enable common compiler warnings.
-#------------------------------------------------------------------------------
-
-CFLAGS = \
--nostdlib \
--static \
--ffreestanding \
--Wall
-
-#------------------------------------------------------------------------------
-# Source files
-#------------------------------------------------------------------------------
+CC     = gcc
+CFLAGS = -nostdlib -static -ffreestanding -Wall -g
 
 SRC = \
-runtime/start.c \
-shell/shell_loop.c \
-kernel/wrappers.c \
-utils/string.c \
-builtins/builtins.c \
-builtins/exit.c \
-builtins/pwd.c \
-builtins/cd.c \
-parser/tokenizer.c \
-executor/executor.c \
-executor/path.c \
-parser/parser.c
-
-#------------------------------------------------------------------------------
-# Build target
-#------------------------------------------------------------------------------
+    runtime/start.c         \
+    shell/shell_loop.c      \
+    kernel/wrappers.c       \
+    utils/string.c          \
+    parser/tokenizer.c      \
+    parser/parser.c         \
+    executor/executor.c     \
+    executor/path.c         \
+    builtins/builtins.c     \
+    builtins/cd.c           \
+    builtins/pwd.c          \
+    builtins/exit.c         \
+    builtins/jobs_builtin.c \
+    signals/signals.c       \
+    jobs/jobs.c             \
+    trace/trace.c
 
 all:
 	$(CC) $(CFLAGS) $(SRC) -o posixsh
+
+clean:
+	rm -f posixsh
+
+.PHONY: all clean

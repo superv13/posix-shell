@@ -1,365 +1,244 @@
-// kernel/wrappers.c
+// kernel/wrappers.c — system call wrapper implementations
+//
+// Every function here does exactly one thing: place arguments into the
+// correct registers and invoke the kernel via the architecture layer.
+// No logic lives here — only the kernel interface.
+
 #include "../include/syscall.h"
 #include "../include/wrappers.h"
+#include "../include/constants.h"
 
-//=============================================================================
-// SYSTEM CALL: sys_write
-//
-// Purpose:
-//   Provides a thin wrapper around the Linux write() system call.
-//   This function allows the shell to send bytes directly to a file
-//   descriptor without using libc functions such as printf() or puts().
-//
-// Why this exists:
-//   Since this shell has zero libc dependency, standard output functions
-//   are unavailable. sys_write() is our explicit interface between the
-//   shell and the Linux kernel.
-//
-// Kernel interaction:
-//   write(fd, buf, count)
-//
-// Parameters:
-//   fd    : File descriptor to write to.
-//           0 -> stdin
-//           1 -> stdout
-//           2 -> stderr
-//
-//   buf   : Memory address of the data to be written.
-//
-//   count : Number of bytes to write.
-//
-// x86-64 syscall convention:
-//   rax = syscall number (1)
-//   rdi = fd
-//   rsi = buf
-//   rdx = count
-//
-// Special notes:
-//   rcx and r11 are modified by the syscall instruction and must be
-//   declared as clobbered registers.
-//
-// Educational note:
-//   This wrapper intentionally exposes how userspace communicates
-//   with the Linux kernel instead of hiding it behind libc.
-//
-//=============================================================================
+// ── I/O ──────────────────────────────────────────────────────────────────
 
-void sys_write(
-    int fd,
-    const char *buf,
-    long count
-)
+void sys_write(int fd, const char *buf, long count)
 {
-    syscall3(
-        SYS_write,
-        fd,
-        (long)buf,
-        count
-    );
+    syscall3(SYS_write, (long)fd, (long)buf, count);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_read
-//
-// Purpose:
-//   Provides a thin wrapper around the Linux read() system call.
-//
-// Why this exists:
-//   Since this shell has zero libc dependency, input must be obtained
-//   directly from the Linux kernel instead of using functions such as
-//   scanf(), fgets() or getchar().
-//
-// Kernel interaction:
-//   read(fd, buf, count)
-//
-// Parameters:
-//   fd    : File descriptor to read from.
-//
-//           0 -> stdin
-//
-//   buf   : Buffer where incoming bytes are stored.
-//
-//   count : Maximum number of bytes to read.
-//
-// Return value:
-//   > 0 : Number of bytes read
-//   = 0 : End of file (EOF)
-//   < 0 : Error
-//
-// Educational note:
-//   This wrapper explicitly exposes how userspace receives data from
-//   the Linux kernel without relying on libc.
-//
-//=============================================================================
-
-long sys_read(
-    int fd,
-    char *buf,
-    long count
-)
+long sys_read(int fd, char *buf, long count)
 {
-    return syscall3(
-        SYS_read,
-        fd,
-        (long)buf,
-        count
-    );
+    return syscall3(SYS_read, (long)fd, (long)buf, count);
 }
 
-
-//=============================================================================
-// SYSTEM CALL: sys_exit
+// sys_open
 //
-// Purpose:
-//   Terminates the current process and returns a status code to
-//   the operating system.
+// x86-64 ABI: rax=2, rdi=pathname, rsi=flags, rdx=mode
 //
-// Why this exists:
-//   Normally, libc provides exit(). Since this shell does not use
-//   libc, process termination must be requested directly from the
-//   Linux kernel.
-//
-// Kernel interaction:
-//   exit(status)
-//
-// Parameters:
-//   status : Process exit code.
-//            0 -> successful termination
-//            non-zero -> abnormal termination
-//
-// x86-64 syscall convention:
-//   rax = syscall number (60)
-//   rdi = status
-//
-// Why while(1) exists:
-//   sys_exit() never returns because the kernel destroys the process.
-//   The infinite loop is a safety measure to prevent undefined
-//   behaviour if execution ever continues unexpectedly.
-//
-// Educational note:
-//   This function demonstrates that process termination is ultimately
-//   a kernel operation rather than a language feature.
-//
-//=============================================================================
-
-void sys_exit(int status)
+// flags examples (from constants.h, not fcntl.h):
+//   O_RDONLY              — input redirection
+//   O_WRONLY|O_CREAT|O_TRUNC  — output redirection (>)
+//   O_WRONLY|O_CREAT|O_APPEND — append redirection (>>)
+long sys_open(const char *pathname, int flags, int mode)
 {
-    syscall1(
-        SYS_exit,
-        status
-    );
-
-    while(1);
+    return syscall3(SYS_open, (long)pathname, (long)flags, (long)mode);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_getcwd
+// sys_close
 //
-// Purpose:
-//   Provides a thin wrapper around the Linux getcwd() system call.
-//
-//=============================================================================
-
-long sys_getcwd(
-    char *buffer,
-    long size
-)
+// Critical for pipeline correctness: every unused pipe end must be closed
+// or readers will never see EOF (see executor.c for the full explanation).
+long sys_close(long fd)
 {
-    return syscall2(
-        SYS_getcwd,
-        (long)buffer,
-        size
-    );
+    return syscall1(SYS_close, fd);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_chdir
-//
-// Purpose:
-//   Provides a thin wrapper around the Linux chdir() system call.
-//
-// Parameters:
-//   path : Path of the target directory.
-//
-// Returns:
-//    0 : Success.
-//   <0 : Linux error code.
-//
-//=============================================================================
+// ── Pipes ─────────────────────────────────────────────────────────────────
 
-long sys_chdir(
-    const char *path
-)
+// sys_pipe
+//
+// x86-64 ABI: rax=22, rdi=pipefd
+// Returns 0 on success.  pipefd[0]=read end, pipefd[1]=write end.
+long sys_pipe(int pipefd[2])
 {
-    return syscall1(
-        SYS_chdir,
-        (long)path
-    );
+    return syscall1(SYS_pipe, (long)pipefd);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_fork
+// sys_dup2
 //
-// Purpose:
-//   Provides a thin wrapper around the Linux fork() system call.
+// x86-64 ABI: rax=33, rdi=oldfd, rsi=newfd
 //
-// Returns:
-//    0 : Child process.
-//   >0 : Parent process (child PID).
-//   <0 : Linux error code.
-//
-//=============================================================================
+// Makes newfd refer to the same open file as oldfd, closing newfd first
+// if it was open.  The atomicity of close+redirect is why dup2() (not a
+// manual close() then open()) is the correct tool for redirection.
+long sys_dup2(long oldfd, long newfd)
+{
+    return syscall2(SYS_dup2, oldfd, newfd);
+}
+
+// ── Process ───────────────────────────────────────────────────────────────
 
 long sys_fork(void)
 {
-    return syscall0(
-        SYS_fork
-    );
+    return syscall0(SYS_fork);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_execve
-//
-// Purpose:
-//   Thin wrapper around Linux execve().
-//
-//=============================================================================
-
-long sys_execve(
-    const char *pathname,
-    char *const argv[],
-    char *const envp[]
-)
+long sys_execve(const char *pathname, char *const argv[], char *const envp[])
 {
-    return syscall3(
-        SYS_execve,
-        (long)pathname,
-        (long)argv,
-        (long)envp
-    );
+    return syscall3(SYS_execve, (long)pathname, (long)argv, (long)envp);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_wait4
+// sys_wait4
 //
-// Purpose:
-//   Provides a thin wrapper around the Linux wait4() system call.
+// x86-64 ABI: rax=61, rdi=pid, rsi=status, rdx=options, r10=rusage(NULL)
 //
-//=============================================================================
+// options flags (constants.h):
+//   0         — block until child exits
+//   WNOHANG   — return 0 immediately if no child has changed state
+//   WUNTRACED — also return when a child is stopped, not just exited
+//
+// rusage: NULL — we do not collect resource statistics.
+long sys_wait4(long pid, int *status, int options)
+{
+    return syscall4(SYS_wait4, pid, (long)status, (long)options, 0L);
+}
 
-long sys_wait4(
-    long pid,
-    int *status,
-    int options
-)
+void sys_exit(int status)
+{
+    syscall1(SYS_exit, (long)status);
+    while (1);   /* safety — execution never reaches here */
+}
+
+// ── Process groups ────────────────────────────────────────────────────────
+
+// sys_getpid
+//
+// Returns the PID of the calling process.
+// Called once at shell startup to record the shell's own PID/PGID so
+// the shell can reclaim terminal control after each foreground pipeline.
+long sys_getpid(void)
+{
+    return syscall0(SYS_getpid);
+}
+
+// sys_setsid
+//
+// x86-64 ABI: rax=112
+//
+// Creates a new session with no controlling terminal.
+// Prerequisite for claiming the PTY slave as the controlling terminal.
+long sys_setsid(void)
+{
+    return syscall0(SYS_setsid);
+}
+
+// sys_tiocsctty
+//
+// ioctl(fd, TIOCSCTTY, 0)
+//
+// Makes `fd` the controlling terminal of the calling process's session.
+// Called once after setsid() so the PTY slave becomes the shell's
+// controlling terminal.  Without this, tcsetpgrp() returns EPERM.
+long sys_tiocsctty(int fd)
+{
+    return syscall3(SYS_ioctl, (long)fd, (long)TIOCSCTTY, 0L);
+}
+
+// sys_setpgid
+//
+// x86-64 ABI: rax=109, rdi=pid, rsi=pgid
+//
+// setpgid(0, 0)  — put self into a new process group (PGID = own PID).
+// setpgid(0, x)  — join existing process group x.
+//
+// Why called from both parent AND child after fork():
+//   Without the parent-side call, a race exists where the parent calls
+//   tcsetpgrp() before the child has run setpgid().  The terminal would
+//   then be given to a group that does not yet contain the child.
+//   Calling from both sides means the process group exists before
+//   tcsetpgrp() regardless of which process runs first.
+long sys_setpgid(long pid, long pgid)
+{
+    return syscall2(SYS_setpgid, pid, pgid);
+}
+
+long sys_getpgid(long pid)
+{
+    return syscall1(SYS_getpgid, pid);
+}
+
+// ── Terminal control ──────────────────────────────────────────────────────
+
+// sys_tcsetpgrp
+//
+// Implemented via: ioctl(fd, TIOCSPGRP, &pgid)
+//
+// Transfers ownership of the terminal to process group `pgid`.
+// After this call, keyboard-generated signals (SIGINT from Ctrl+C,
+// SIGTSTP from Ctrl+Z) are delivered to `pgid`, not to the shell.
+//
+// Called before waiting for a foreground pipeline.
+// Called again (with g_shell_pgid) after the pipeline finishes to
+// give the terminal back to the shell.
+long sys_tcsetpgrp(int fd, long pgid)
+{
+    /*
+     * TIOCSPGRP takes a pointer to the pgid, not the pgid directly.
+     * We copy to a local int because syscall3 takes long arguments and
+     * the kernel expects int* for this ioctl.
+     */
+    int pg = (int)pgid;
+    return syscall3(SYS_ioctl, (long)fd, (long)TIOCSPGRP, (long)&pg);
+}
+
+// sys_tcgetpgrp
+//
+// Implemented via: ioctl(fd, TIOCGPGRP, &pgid)
+//
+// Returns the PGID currently controlling the terminal.
+// Used at shell startup to verify the shell is in the foreground.
+long sys_tcgetpgrp(int fd)
+{
+    int pg = 0;
+    syscall3(SYS_ioctl, (long)fd, (long)TIOCGPGRP, (long)&pg);
+    return (long)pg;
+}
+
+// ── Signals ───────────────────────────────────────────────────────────────
+
+// sys_sigaction
+//
+// x86-64 ABI: rax=13, rdi=signum, rsi=act, rdx=oldact, r10=sigsetsize
+//
+// sigsetsize MUST be KERNEL_SIGSET_SIZE (8).  The kernel uses this to
+// validate the sa_mask field length.  Passing the wrong value causes
+// EINVAL and the signal handler is not installed.
+//
+// `act` and `oldact` point to kernel_sigaction_t (signals/signals.h).
+// Declared void* here to avoid a circular include between wrappers.h
+// and signals.h.
+long sys_sigaction(int signum, const void *act, void *oldact)
 {
     return syscall4(
-        SYS_wait4,
-        pid,
-        (long)status,
-        options,
-        0          /* struct rusage * = NULL */
+        SYS_rt_sigaction,
+        (long)signum,
+        (long)act,
+        (long)oldact,
+        (long)KERNEL_SIGSET_SIZE
     );
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_open
+// sys_kill
 //
-// Purpose:
-//   Thin wrapper around the Linux open() system call.
+// x86-64 ABI: rax=62, rdi=pid, rsi=sig
 //
-//=============================================================================
-
-long sys_open(
-    const char *pathname,
-    int flags,
-    int mode
-)
+// pid > 0 : send to specific process.
+// pid < 0 : send to entire process group |pid|.
+//
+// Usage in job control:
+//   sys_kill(-pgid, SIGCONT)  — resume a stopped pipeline.
+long sys_kill(long pid, int sig)
 {
-    return syscall3(
-        SYS_open,
-        (long)pathname,
-        (long)flags,
-        (long)mode
-    );
+    return syscall2(SYS_kill, pid, (long)sig);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_close
-//
-// Purpose:
-//   Thin wrapper around the Linux close() system call.
-//
-//=============================================================================
+// ── Directory ─────────────────────────────────────────────────────────────
 
-long sys_close(
-    long fd
-)
+long sys_getcwd(char *buffer, long size)
 {
-    return syscall1(
-        SYS_close,
-        fd
-    );
+    return syscall2(SYS_getcwd, (long)buffer, size);
 }
 
-//=============================================================================
-// SYSTEM CALL: sys_pipe
-//
-// Purpose:
-//   Thin wrapper around the Linux pipe() system call.
-//
-// Kernel interaction:
-//   pipe(pipefd)
-//
-// x86-64 syscall convention:
-//   rax = syscall number (22)
-//   rdi = pipefd (pointer to int[2])
-//
-// Educational note:
-//   The kernel writes the read-end fd into pipefd[0] and the write-end fd
-//   into pipefd[1]. Unlike pipe2(), there are no flags here.
-//
-//=============================================================================
-
-long sys_pipe(
-    int pipefd[2]
-)
+long sys_chdir(const char *path)
 {
-    return syscall1(
-        SYS_pipe,
-        (long)pipefd
-    );
-}
-
-//=============================================================================
-// SYSTEM CALL: sys_dup2
-//
-// Purpose:
-//   Thin wrapper around the Linux dup2() system call.
-//
-// Kernel interaction:
-//   dup2(oldfd, newfd)
-//
-// x86-64 syscall convention:
-//   rax = syscall number (33)
-//   rdi = oldfd
-//   rsi = newfd
-//
-// Educational note:
-//   If newfd is already open, the kernel closes it first, atomically,
-//   before reusing the number. This atomicity is exactly why dup2() (and
-//   not close()+open()) is the correct tool for redirection.
-//
-//=============================================================================
-
-long sys_dup2(
-    long oldfd,
-    long newfd
-)
-{
-    return syscall2(
-        SYS_dup2,
-        oldfd,
-        newfd
-    );
+    return syscall1(SYS_chdir, (long)path);
 }

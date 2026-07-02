@@ -1,13 +1,9 @@
 /*
 ===============================================================================
-start.c
-
-Purpose:
-    Defines the custom program entry point (_start) for the educational
-    POSIX shell.
+runtime/start.c — custom program entry point
 
 Why this file exists:
-    In a normal C program, Linux does not directly execute main(). The
+    In a normal C program, Linux does not directly execute main().  The
     standard C runtime (crt0 + libc) performs initialization and then
     calls main().
 
@@ -16,59 +12,47 @@ Why this file exists:
 
 Execution flow:
 
-    Normal C program:
+    Linux kernel
+          ↓
+       _start()          ← this file
+          ↓
+      shell_main(argc, argv)
+          ↓
+        sys_exit()
 
-        Linux kernel
-              ↓
-        _start() (provided by libc)
-              ↓
-        __libc_start_main()
-              ↓
-             main()
+How _start reads argc/argv:
+    On x86-64 Linux, at process entry the kernel pushes onto the stack:
+        [rsp+0]   argc          (long)
+        [rsp+8]   argv[0]       (char *)
+        [rsp+16]  argv[1] ...
+        ...
+        [rsp+8*(argc+1)]  NULL  (argv sentinel)
 
-    This project:
-
-        Linux kernel
-              ↓
-           _start()
-              ↓
-         shell_main()
-              ↓
-          sys_exit()
-
-Educational objective:
-    This file exposes the hidden startup sequence that is normally managed
-    by libc and gives complete control over the shell runtime.
-
-Future extensions:
-    _start() will later be responsible for extracting:
-        - argc
-        - argv
-        - environment variables (envp)
-
+    We read these with a tiny __asm__ that copies rsp into a local
+    pointer, then index into it as a long array.
 ===============================================================================
 */
 
 /* Forward declarations */
-void shell_main(void);
+void shell_main(int argc, char **argv);
 void sys_exit(int status);
 
 /*
-Purpose:
-    Entry point executed directly by the Linux kernel.
-
-Current behaviour:
-    Transfers control to shell_main() and terminates the process when
-    shell execution finishes.
-
-Why sys_exit() is used:
-    Without libc, returning from _start() is unsafe because there is no
-    runtime environment to receive the return value. Process termination
-    must be explicitly requested from the kernel.
-*/
-void _start(void)
+ * _start
+ *
+ * Entry point executed directly by the Linux kernel.
+ *
+ * Reads argc and argv from the initial stack layout, then calls shell_main.
+ */
+void __attribute__((naked)) _start(void)
 {
-    shell_main();
-
-    sys_exit(0);
+    __asm__ volatile(
+        /* rsp points to [argc, argv[0], argv[1], ..., NULL]   */
+        "pop    %%rdi\n\t"       /* rdi = argc                  */
+        "mov    %%rsp, %%rsi\n\t"/* rsi = &argv[0]              */
+        "call   shell_main\n\t"
+        "mov    %%rax, %%rdi\n\t"/* exit status = return value  */
+        "call   sys_exit\n\t"
+        ::: "memory"
+    );
 }
