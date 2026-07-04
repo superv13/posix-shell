@@ -1,171 +1,71 @@
-//=============================================================================
-// executor.c
+// executor/executor.c — Phase 4 execution engine
 //
-// Purpose:
-//   Implements the Phase 3 execution engine of the educational POSIX shell.
-//
-// Why this file exists:
-//   The parser only understands command syntax. The executor is responsible
-//   for transforming a parsed Pipeline into one or more running processes.
-//
-// Phase 3 implementation:
-//   - PATH lookup                              (executor/path.c)
-//   - N-stage pipelines  ("a | b | c")          -> N-1 pipe(), N fork()
-//   - I/O redirection    ("<", ">", ">>")       -> open() + dup2()
-//   - Background jobs    ("cmd &")              -> no wait4() in parent
-//
-// Pipeline wiring, conceptually, for "a | b | c":
-//
-//   stdin --> [a] --> pipe0 --> [b] --> pipe1 --> [c] --> stdout
-//
-//   Stage i (0-indexed) reads from pipes[i-1] (if i > 0)
-//   Stage i writes to   pipes[i]   (if i < count-1)
-//
-// Why redirection is applied *after* pipe dup2():
-//   A command can legally use both a pipe and a redirect, e.g.
-//   "sort < unsorted.txt | uniq". The pipe wiring sets up the "default"
-//   stdin/stdout for each stage; an explicit redirect on that same stage
-//   then overrides it. Doing redirection second means "<"/">" always wins,
-//   which matches POSIX shell semantics.
-//
-// Why every pipe fd is closed in every child:
-//   Pipes only deliver EOF to a reader once *every* writable copy of the
-//   write end is closed. If a child inherits pipe fds it never uses (e.g.
-//   stage 0 inheriting pipes[1] meant for stage 1/2) and never closes them,
-//   downstream readers can hang forever waiting for EOF that never comes.
-//   We close every pipe fd in every child immediately after dup2(), keeping
-//   only the two descriptors (0 and 1) that were just wired up.
-//
-//=============================================================================
+// Phase 4 additions over Phase 3:
+//   1. Every pipeline gets its own process group (PGID = first child PID).
+//   2. Foreground pipelines receive terminal control via tcsetpgrp.
+//   3. Children reset signal handlers to SIG_DFL before exec.
+//   4. Ctrl+Z (SIGTSTP) on a foreground job: detected via WUNTRACED,
+//      job added to table as JOB_STOPPED, terminal returned to shell.
+//   5. Background jobs are added to the job table.
+//   6. Terminal is always restored to the shell after foreground jobs.
 
 #include "executor.h"
+#include "path.h"
 
 #include "../include/wrappers.h"
 #include "../include/constants.h"
 #include "../utils/string.h"
-#include "../executor/path.h"
 #include "../builtins/builtins.h"
+#include "../signals/signals.h"
+#include "../jobs/jobs.h"
+#include "../trace/trace.h"
 
-/*
-===============================================================================
-FUNCTION: write_str
+// Stdin file descriptor — the terminal we hand to foreground jobs
+#define STDIN_FD  0
 
-Purpose:
-    Tiny helper so error paths below stay readable. Wraps sys_write() with
-    an implicit strlen(), matching the style already used in builtins.c.
-===============================================================================
-*/
+/*===========================================================================
+ Internal helpers
+===========================================================================*/
 
-static void write_str(
-    int fd,
-    const char *s
-)
+static void write_str(int fd, const char *s)
 {
-    sys_write(
-        fd,
-        s,
-        my_strlen(s)
-    );
+    sys_write(fd, s, my_strlen(s));
 }
 
-/*
-===============================================================================
-FUNCTION: print_long
-
-Purpose:
-    Converts a long to decimal ASCII and writes it to fd, without using
-    libc's printf()/itoa(). Used only for the "[bg pid N]" job notice.
-
-Educational note:
-    Digits are produced least-significant-first into a small stack buffer,
-    then written out in reverse (most-significant-first), which is the
-    standard zero-allocation integer-to-string technique.
-===============================================================================
-*/
-
-static void print_long(
-    int fd,
-    long value
-)
+static void print_long(int fd, long value)
 {
     char digits[20];
     int  i = 0;
 
-    if (value == 0)
-    {
-        write_str(fd, "0");
-        return;
-    }
+    if (value == 0) { write_str(fd, "0"); return; }
 
     int negative = (value < 0);
-    if (negative)
-    {
-        value = -value;
-    }
+    if (negative) value = -value;
 
     while (value > 0 && i < (int)sizeof(digits))
     {
-        digits[i++] = '0' + (value % 10);
+        digits[i++] = (char)('0' + (value % 10));
         value /= 10;
     }
 
     char out[21];
     int  j = 0;
-
-    if (negative)
-    {
-        out[j++] = '-';
-    }
-
-    while (i > 0)
-    {
-        out[j++] = digits[--i];
-    }
-
+    if (negative) out[j++] = '-';
+    while (i > 0) out[j++] = digits[--i];
     out[j] = '\0';
-
     write_str(fd, out);
 }
 
-/*
-===============================================================================
-FUNCTION: apply_redirections
+/*===========================================================================
+ apply_redirections — open files and dup2 onto stdin/stdout
+ (unchanged from Phase 3)
+===========================================================================*/
 
-Purpose:
-    Opens any "<", ">" or ">>" target named in cmd and dup2()s it onto the
-    correct standard file descriptor (0 for input, 1 for output).
-
-Kernel interaction:
-    open(pathname, flags, mode)   -- creates/opens the target file
-    dup2(fd, 0 or 1)              -- makes that file *be* stdin/stdout
-    close(fd)                     -- the original high-numbered fd is no
-                                     longer needed once duped onto 0/1
-
-Why dup2() and not just using the opened fd directly:
-    execve() does not take a list of "this program's stdin is fd 7". Every
-    program assumes its input is fd 0 and its output is fd 1. dup2() is how
-    the shell rewires those fixed numbers before execve() replaces the
-    process image.
-
-Returns:
-     0 : Success (or nothing to redirect).
-    -1 : open() failed; caller should abandon this command.
-===============================================================================
-*/
-
-static int apply_redirections(
-    Command *cmd
-)
+static int apply_redirections(Command *cmd)
 {
     if (cmd->input_file[0] != '\0')
     {
-        long fd =
-            sys_open(
-                cmd->input_file,
-                O_RDONLY,
-                0
-            );
-
+        long fd = sys_open(cmd->input_file, O_RDONLY, 0);
         if (fd < 0)
         {
             write_str(2, "posixsh: cannot open ");
@@ -173,24 +73,16 @@ static int apply_redirections(
             write_str(2, " for reading\n");
             return -1;
         }
-
         sys_dup2(fd, 0);
         sys_close(fd);
     }
 
     if (cmd->output_file[0] != '\0')
     {
-        int flags =
-            O_WRONLY | O_CREAT |
-            (cmd->append ? O_APPEND : O_TRUNC);
+        int flags = O_WRONLY | O_CREAT |
+                    (cmd->append ? O_APPEND : O_TRUNC);
 
-        long fd =
-            sys_open(
-                cmd->output_file,
-                flags,
-                REDIR_CREATE_MODE
-            );
-
+        long fd = sys_open(cmd->output_file, flags, REDIR_CREATE_MODE);
         if (fd < 0)
         {
             write_str(2, "posixsh: cannot open ");
@@ -198,7 +90,6 @@ static int apply_redirections(
             write_str(2, " for writing\n");
             return -1;
         }
-
         sys_dup2(fd, 1);
         sys_close(fd);
     }
@@ -206,21 +97,11 @@ static int apply_redirections(
     return 0;
 }
 
-/*
-===============================================================================
-FUNCTION: close_all_pipes
+/*===========================================================================
+ close_all_pipes
+===========================================================================*/
 
-Purpose:
-    Closes every fd belonging to every pipe in this pipeline. Called by
-    every child (after wiring its own two fds) and by the parent (once all
-    children exist).
-===============================================================================
-*/
-
-static void close_all_pipes(
-    int pipes[][2],
-    int num_pipes
-)
+static void close_all_pipes(int pipes[][2], int num_pipes)
 {
     for (int i = 0; i < num_pipes; i++)
     {
@@ -229,80 +110,82 @@ static void close_all_pipes(
     }
 }
 
-/*
-===============================================================================
-FUNCTION: run_stage
+/*===========================================================================
+ run_stage — runs inside a child process, never returns
 
-Purpose:
-    Runs inside the freshly fork()'d child for pipeline stage `index`.
-    Never returns: every path through this function ends in sys_exit().
-
-Steps, in required order:
-    1. dup2() the pipe ends this stage needs onto fd 0 / fd 1.
-    2. Close every pipe fd (see file-level comment on why this matters).
-    3. Apply explicit redirections (these override the pipe wiring above).
-    4. Run as a builtin, if marked as one, OR resolve PATH and execve().
-===============================================================================
-*/
+ Phase 4 additions:
+   1. sys_setpgid(0, pipeline_pgid)  — join the pipeline's process group.
+   2. reset_child_signals()          — restore SIG_DFL before exec.
+===========================================================================*/
 
 static void run_stage(
     Command *cmd,
     int      index,
     int      count,
     int      pipes[][2],
-    int      num_pipes
+    int      num_pipes,
+    long     pipeline_pgid   /* Phase 4: PGID for this pipeline */
 )
 {
+    /*
+     * SYSCALL: setpgid(0, pipeline_pgid)
+     *
+     * Put this child into the pipeline's process group.
+     * For the first child (index 0), pipeline_pgid == 0, which the
+     * kernel interprets as "use my own PID as PGID", creating a new group.
+     * For subsequent children, pipeline_pgid is the first child's PID,
+     * so they all join the same group.
+     *
+     * Also called from the parent (in execute_pipeline) to avoid the race
+     * where tcsetpgrp runs before the child's setpgid.
+     */
+    sys_setpgid(0, pipeline_pgid);
+
+    /*
+     * Reset all signal handlers to SIG_DFL.
+     *
+     * The shell ignores SIGINT, SIGTSTP, etc.  Without this call the
+     * child would inherit SIG_IGN and Ctrl+C / Ctrl+Z would have no
+     * effect on the running program.
+     */
+    reset_child_signals();
+
+    /* Wire this stage's stdin/stdout to the adjacent pipes */
     if (index > 0)
-    {
-        /* Not the first stage: stdin comes from the previous pipe. */
         sys_dup2(pipes[index - 1][0], 0);
-    }
 
     if (index < count - 1)
-    {
-        /* Not the last stage: stdout goes to the next pipe. */
         sys_dup2(pipes[index][1], 1);
-    }
 
+    /*
+     * Close every pipe fd.
+     *
+     * SYSCALL: close(fd) × 2 × num_pipes
+     *
+     * Each child inherits ALL pipe fds.  The ones not dup2'd onto
+     * fd 0/1 must be closed or downstream readers never see EOF.
+     */
     close_all_pipes(pipes, num_pipes);
 
+    /* Apply explicit file redirections (override pipe wiring if present) */
     if (apply_redirections(cmd) < 0)
-    {
         sys_exit(1);
-    }
 
     if (cmd->argc == 0)
-    {
-        /*
-         * A "command" with no words at all (e.g. a bare "> file" line).
-         * Nothing to execute; the side effect (creating/truncating the
-         * file) already happened in apply_redirections().
-         */
         sys_exit(0);
-    }
 
     if (cmd->is_builtin)
     {
         /*
-         * Builtins inside a pipeline run inside this child, not the shell
-         * process, since the child is already a throwaway subshell-like
-         * process. This matches POSIX semantics: builtins that appear as
-         * non-last/last stages of a pipe execute in a subshell and cannot
-         * affect the parent shell's state (e.g. "cd /tmp | true" does not
-         * change the interactive shell's directory).
+         * Builtins inside a pipeline run in this child (a subshell).
+         * They cannot affect the interactive shell's state (e.g. cd in
+         * a pipeline does not change the shell's directory).
          */
         if (execute_builtin(cmd))
-        {
             sys_exit(0);
-        }
-        /* Recognised as a builtin keyword but not yet implemented
-         * (jobs/fg/bg belong to Phase 4) -- fall through to PATH lookup
-         * so the failure mode is consistent: "command not found". */
     }
 
-    char *path =
-        find_executable(cmd->argv[0]);
+    char *path = find_executable(cmd->argv[0]);
 
     if (path == 0)
     {
@@ -312,58 +195,32 @@ static void run_stage(
         sys_exit(127);
     }
 
-    sys_execve(
-        path,
-        cmd->argv,
-        0
-    );
-
     /*
-     * execve() returns only on failure.
+     * SYSCALL: execve(path, argv, NULL)
+     *
+     * Replace this process image with the target program.
+     * envp = NULL: no environment passed (Phase 5 will add env support).
+     * Never returns on success.
      */
+    trace_execve(path);   /* [TRACE] execve(<path>, ...) */
+    sys_execve(path, cmd->argv, 0);
+
     write_str(2, "posixsh: ");
     write_str(2, cmd->argv[0]);
     write_str(2, ": exec failed\n");
     sys_exit(126);
 }
 
-/*
-===============================================================================
-FUNCTION: execute_pipeline
+/*===========================================================================
+ execute_pipeline — Phase 4 complete implementation
+===========================================================================*/
 
-Purpose:
-    Executes a parsed command pipeline of 1..MAX_PIPELINE_DEPTH stages,
-    wiring N-1 pipes between them, then either waits for all stages
-    (foreground) or returns immediately (background, "cmd &").
-
-Process creation order matters:
-    All N pipes are created *before* any fork(), so that every child can
-    see every pipe fd at fork time. Each child then keeps only the two fds
-    it actually needs and closes the rest (see close_all_pipes()).
-
-Returns:
-     0 : Pipeline launched successfully (background), or completed
-         (foreground) -- the foreground exit status of the last stage is
-         returned via the lower byte where relevant, 0 otherwise.
-    -1 : pipe() or fork() failed; the pipeline could not be started.
-===============================================================================
-*/
-
-int execute_pipeline(
-    Pipeline *pipeline
-)
+int execute_pipeline(Pipeline *pipeline)
 {
-    if (pipeline == 0)
-    {
-        return -1;
-    }
+    if (pipeline == 0) return -1;
 
     int count = pipeline->count;
-
-    if (count == 0)
-    {
-        return 0;
-    }
+    if (count == 0) return 0;
 
     if (count > MAX_PIPELINE_DEPTH)
     {
@@ -374,96 +231,210 @@ int execute_pipeline(
     int  num_pipes = count - 1;
     int  pipes[MAX_PIPELINE_DEPTH - 1][2];
     long pids[MAX_PIPELINE_DEPTH];
+    long pipeline_pgid = 0;  /* Set to PID of first child after first fork */
 
-    /*
-     * Step 1: create every pipe up front. (See file-level comment.)
-     */
+    /* ── Step 1: Create all pipes ───────────────────────────────────── */
     for (int i = 0; i < num_pipes; i++)
     {
         if (sys_pipe(pipes[i]) < 0)
         {
             write_str(2, "posixsh: pipe failed\n");
-
-            /* Best effort: close whatever pipes already succeeded. */
             close_all_pipes(pipes, i);
-
             return -1;
         }
     }
 
-    /*
-     * Step 2: fork one child per pipeline stage.
-     */
+    /* ── Step 2: Fork one child per stage ───────────────────────────── */
     for (int i = 0; i < count; i++)
     {
+        /*
+         * SYSCALL: fork()
+         *
+         * Creates a copy of the shell process.  The child inherits all
+         * open file descriptors (including every pipe fd created above).
+         */
         long pid = sys_fork();
 
         if (pid == 0)
         {
-            /* Child: never returns. */
+            /*
+             * Child: pipeline_pgid is 0 for the first child
+             * (setpgid(0,0) → creates new group with own PID).
+             * For children 1..N-1 it is the first child's PID
+             * (setpgid(0, pgid) → join that group).
+             */
             run_stage(
                 &pipeline->commands[i],
-                i,
-                count,
-                pipes,
-                num_pipes
+                i, count,
+                pipes, num_pipes,
+                pipeline_pgid
             );
+            /* run_stage never returns */
         }
-        else if (pid > 0)
-        {
-            pids[i] = pid;
-        }
-        else
+
+        if (pid < 0)
         {
             write_str(2, "posixsh: fork failed\n");
             close_all_pipes(pipes, num_pipes);
             return -1;
         }
+
+        /* [TRACE] fork() -> <child_pid> */
+        trace_fork(pid);
+
+        pids[i] = pid;
+
+        /*
+         * Record the pipeline's PGID from the first child's PID.
+         * The parent also calls setpgid() here (race-condition prevention):
+         * either the parent or child will call it first; both calling
+         * ensures the group exists by the time tcsetpgrp() is called.
+         */
+        if (i == 0)
+        {
+            pipeline_pgid = pid;
+
+            /*
+             * SYSCALL: setpgid(pid, pid)
+             *
+             * Put the first child in its own process group.
+             * This mirrors the setpgid(0, 0) the child itself calls.
+             * Calling from both parent and child avoids the race.
+             */
+            sys_setpgid(pid, pid);
+        }
+        else
+        {
+            /*
+             * SYSCALL: setpgid(pid, pipeline_pgid)
+             *
+             * Add this child to the existing pipeline process group.
+             */
+            sys_setpgid(pid, pipeline_pgid);
+        }
     }
 
+    /* ── Step 3: Parent closes all pipe fds ─────────────────────────── */
     /*
-     * Step 3: the parent (shell) never reads or writes through these
-     * pipes directly -- only the children do. Closing them here is what
-     * lets EOF eventually propagate once the children finish.
+     * SYSCALL: close(fd) × 2 × num_pipes
+     *
+     * If the parent holds any write end open, the child reading from
+     * the corresponding read end will never see EOF.  Deadlock.
      */
     close_all_pipes(pipes, num_pipes);
 
+    /* ── Step 4: Background vs foreground ───────────────────────────── */
     if (pipeline->background)
     {
         /*
-         * "cmd &" : do not wait. The shell returns to the prompt
-         * immediately. Without a SIGCHLD handler (Phase 4), background
-         * children become zombies until the shell exits or a future
-         * wait4() call reaps them -- acceptable for the Phase 3 milestone.
+         * Background pipeline: do NOT give it terminal control.
+         * If it tries to read from the terminal, SIGTTIN will stop it.
+         *
+         * Add to job table so jobs/fg/bg can manage it.
          */
-        write_str(1, "[bg pid ");
-        print_long(1, pids[count - 1]);
-        write_str(1, "]\n");
+        char cmd_str[MAX_INPUT];
+        build_cmd_string(pipeline, cmd_str, MAX_INPUT);
+
+        int jnum = add_job(
+            pipeline_pgid,
+            pids,
+            count,
+            JOB_RUNNING,
+            cmd_str
+        );
+
+        /* Print job notification: "[1] 4231" */
+        write_str(1, "[");
+        print_long(1, (long)jnum);
+        write_str(1, "] ");
+        print_long(1, pipeline_pgid);
+        write_str(1, "\n");
 
         return 0;
     }
 
+    /* ── Foreground: give terminal to the pipeline ───────────────────── */
     /*
-     * Foreground: wait for every stage so the prompt does not reappear
-     * until the whole pipeline has finished. The exit status reported is
-     * that of the *last* stage, matching POSIX "$?" semantics for pipes.
+     * SYSCALL: tcsetpgrp(STDIN_FD, pipeline_pgid)
+     *   (implemented as ioctl(STDIN_FD, TIOCSPGRP, &pipeline_pgid))
+     *
+     * Transfers terminal ownership to the pipeline's process group.
+     * After this call, Ctrl+C sends SIGINT to pipeline_pgid (not the
+     * shell), and Ctrl+Z sends SIGTSTP to pipeline_pgid.
+     *
+     * The shell's own SIGINT/SIGTSTP dispositions are SIG_IGN (set by
+     * setup_shell_signals), so the shell itself is unaffected.
+     */
+    sys_tcsetpgrp(STDIN_FD, pipeline_pgid);
+
+    /* ── Wait for every stage (foreground) ──────────────────────────── */
+    /*
+     * We wait with WUNTRACED so that Ctrl+Z (which stops the foreground
+     * process group via SIGTSTP) causes wait4 to return rather than
+     * blocking forever.  WIFSTOPPED(status) will be true in that case.
      */
     int last_status = 0;
+    int all_stopped = 0;
 
     for (int i = 0; i < count; i++)
     {
         int status = 0;
 
-        sys_wait4(
-            pids[i],
-            &status,
-            0
-        );
+        /*
+         * SYSCALL: wait4(pids[i], &status, WUNTRACED, NULL)
+         *
+         * Blocks until child pids[i] exits OR is stopped.
+         */
+        sys_wait4(pids[i], &status, WUNTRACED);
+
+        if (WIFSTOPPED(status))
+        {
+            /*
+             * Ctrl+Z: the child was stopped by SIGTSTP.
+             * We need to add this pipeline to the job table as JOB_STOPPED
+             * so the user can resume it with fg or bg.
+             */
+            all_stopped = 1;
+        }
 
         if (i == count - 1)
-        {
             last_status = status;
-        }
+    }
+
+    /* ── Restore terminal to the shell ──────────────────────────────── */
+    /*
+     * SYSCALL: tcsetpgrp(STDIN_FD, g_shell_pgid)
+     *
+     * Return terminal ownership to the shell's process group.
+     * Must happen whether the job exited normally OR was stopped.
+     * Without this the shell's next read() would trigger SIGTTIN and
+     * the shell itself would be stopped.
+     */
+    sys_tcsetpgrp(STDIN_FD, g_shell_pgid);
+
+    /* ── Handle stopped foreground job ──────────────────────────────── */
+    if (all_stopped)
+    {
+        /*
+         * Move the stopped pipeline to the job table so the user can
+         * resume it with fg %N or bg %N.
+         */
+        char cmd_str[MAX_INPUT];
+        build_cmd_string(pipeline, cmd_str, MAX_INPUT);
+
+        int jnum = add_job(
+            pipeline_pgid,
+            pids,
+            count,
+            JOB_STOPPED,
+            cmd_str
+        );
+
+        Job *j = find_job_by_num(jnum);
+        if (j != 0)
+            print_job_line(j, 1);
+
+        return last_status;
     }
 
     return last_status;

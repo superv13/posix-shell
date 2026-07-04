@@ -3,86 +3,30 @@
 
 /*
 ===============================================================================
-executor.h
-
-Purpose:
-    Declares the public interface of the shell execution engine.
-
-Why this file exists:
-    After the parser constructs a Pipeline object, control is transferred
-    to the executor. The executor is responsible for running builtin
-    commands or launching external programs using Linux system calls.
-
-Responsibilities:
-    - Execute builtin commands (already identified by the parser)
-    - Create child processes
-    - Execute external programs
-    - Wait for foreground processes
-    - (Future) Handle pipes and redirection
-    - (Future) Handle background jobs
-
-Execution flow:
-
-    shell_main()
-
-          │
-
-          ▼
-
-    execute_pipeline()
-
-          │
-
-    ┌─────┴─────┐
-
- Builtin      External
-
-    │             │
-
- execute     fork()
-
-                │
-
-            execve()
-
-                │
-
-            wait4()
-
+executor/executor.h — Phase 4 execution engine interface
 ===============================================================================
 */
 
 #include "../parser/parser.h"
 
 /*
-===============================================================================
-FUNCTION: execute_pipeline
+ * execute_pipeline
+ *
+ * Executes a fully parsed Pipeline.
+ *
+ * Phase 4 behaviour:
+ *   - Each pipeline gets its own process group (PGID = first child PID).
+ *   - Foreground pipelines receive terminal control via tcsetpgrp.
+ *   - Ctrl+Z (SIGTSTP) is detected via WUNTRACED; job is moved to table.
+ *   - Background pipelines are added to the job table.
+ *   - Terminal is always restored to the shell after foreground jobs.
+ *   - Children reset signal handlers to SIG_DFL before exec.
+ *
+ * Returns:
+ *    0  : success
+ *   -1  : a syscall failed (fork, pipe, etc.)
+ *   other: last child's exit status
+ */
+int execute_pipeline(Pipeline *pipeline);
 
-Purpose:
-    Executes a parsed command pipeline.
-
-Parameters:
-    pipeline : Parsed pipeline produced by the parser.
-
-Returns:
-     0 : Success.
-    -1 : Execution error.
-
-Current implementation (Phase 3):
-    - N-stage pipelines ("a | b | c")
-    - Input/output redirection ("<", ">", ">>")
-    - Background execution ("cmd &")
-    - PATH-resolved external commands and in-pipeline builtins
-
-Future extensions:
-    - Job table / job control (fg, bg, jobs) -- Phase 4
-    - Signal handling, process groups -- Phase 4
-
-===============================================================================
-*/
-
-int execute_pipeline(
-    Pipeline *pipeline
-);
-
-#endif
+#endif  /* EXECUTOR_H */
