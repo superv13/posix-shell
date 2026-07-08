@@ -19,6 +19,7 @@
 #include "../signals/signals.h"
 #include "../jobs/jobs.h"
 #include "../trace/trace.h"
+#include "../env/env.h"
 
 // Stdin file descriptor — the terminal we hand to foreground jobs
 #define STDIN_FD  0
@@ -196,14 +197,26 @@ static void run_stage(
     }
 
     /*
-     * SYSCALL: execve(path, argv, NULL)
+     * SYSCALL: execve(path, argv, g_environ)
      *
      * Replace this process image with the target program.
-     * envp = NULL: no environment passed (Phase 5 will add env support).
+     *
+     * Phase 5 change: envp is now g_environ instead of NULL.
+     *
+     * Why this matters:
+     *   With envp = NULL, every child process starts with an empty
+     *   environment.  Programs that read PATH, HOME, TERM, LANG, or any
+     *   other variable receive nothing.  "python3 -c 'import os; print(os.environ)'"
+     *   would print an empty dict.
+     *
+     *   Passing g_environ (the real envp captured at _start from the
+     *   kernel stack) gives every child the same environment the shell
+     *   itself was started with — exactly the POSIX-required behaviour.
+     *
      * Never returns on success.
      */
     trace_execve(path);   /* [TRACE] execve(<path>, ...) */
-    sys_execve(path, cmd->argv, 0);
+    sys_execve(path, cmd->argv, g_environ);
 
     write_str(2, "posixsh: ");
     write_str(2, cmd->argv[0]);
@@ -326,12 +339,6 @@ int execute_pipeline(Pipeline *pipeline)
     /* ── Step 4: Background vs foreground ───────────────────────────── */
     if (pipeline->background)
     {
-        /*
-         * Background pipeline: do NOT give it terminal control.
-         * If it tries to read from the terminal, SIGTTIN will stop it.
-         *
-         * Add to job table so jobs/fg/bg can manage it.
-         */
         char cmd_str[MAX_INPUT];
         build_cmd_string(pipeline, cmd_str, MAX_INPUT);
 
@@ -343,38 +350,33 @@ int execute_pipeline(Pipeline *pipeline)
             cmd_str
         );
 
-        /* Print job notification: "[1] 4231" */
         write_str(1, "[");
         print_long(1, (long)jnum);
         write_str(1, "] ");
         print_long(1, pipeline_pgid);
         write_str(1, "\n");
 
+        /*
+         * Phase 5: POSIX XBD 2.8.2 — "If a pipeline is run in the
+         * background, the exit status is 0."
+         * g_last_status = 0 so that $? after "cmd &" is always 0.
+         */
+        g_last_status = 0;
         return 0;
     }
 
     /* ── Foreground: give terminal to the pipeline ───────────────────── */
     /*
      * SYSCALL: tcsetpgrp(STDIN_FD, pipeline_pgid)
-     *   (implemented as ioctl(STDIN_FD, TIOCSPGRP, &pipeline_pgid))
      *
-     * Transfers terminal ownership to the pipeline's process group.
-     * After this call, Ctrl+C sends SIGINT to pipeline_pgid (not the
-     * shell), and Ctrl+Z sends SIGTSTP to pipeline_pgid.
-     *
-     * The shell's own SIGINT/SIGTSTP dispositions are SIG_IGN (set by
-     * setup_shell_signals), so the shell itself is unaffected.
+     * Transfers terminal ownership to the pipeline's process group so
+     * Ctrl+C and Ctrl+Z reach the job, not the shell.
      */
     sys_tcsetpgrp(STDIN_FD, pipeline_pgid);
 
     /* ── Wait for every stage (foreground) ──────────────────────────── */
-    /*
-     * We wait with WUNTRACED so that Ctrl+Z (which stops the foreground
-     * process group via SIGTSTP) causes wait4 to return rather than
-     * blocking forever.  WIFSTOPPED(status) will be true in that case.
-     */
-    int last_status = 0;
-    int all_stopped = 0;
+    int last_raw_status = 0;    /* raw wait4 status word of last stage */
+    int all_stopped     = 0;
 
     for (int i = 0; i < count; i++)
     {
@@ -383,42 +385,60 @@ int execute_pipeline(Pipeline *pipeline)
         /*
          * SYSCALL: wait4(pids[i], &status, WUNTRACED, NULL)
          *
-         * Blocks until child pids[i] exits OR is stopped.
+         * WUNTRACED: also returns when the child is stopped (Ctrl+Z),
+         * not only when it exits.  Without WUNTRACED, Ctrl+Z would cause
+         * wait4 to block forever.
          */
         sys_wait4(pids[i], &status, WUNTRACED);
 
         if (WIFSTOPPED(status))
-        {
-            /*
-             * Ctrl+Z: the child was stopped by SIGTSTP.
-             * We need to add this pipeline to the job table as JOB_STOPPED
-             * so the user can resume it with fg or bg.
-             */
             all_stopped = 1;
-        }
 
         if (i == count - 1)
-            last_status = status;
+            last_raw_status = status;
     }
 
     /* ── Restore terminal to the shell ──────────────────────────────── */
     /*
      * SYSCALL: tcsetpgrp(STDIN_FD, g_shell_pgid)
      *
-     * Return terminal ownership to the shell's process group.
-     * Must happen whether the job exited normally OR was stopped.
-     * Without this the shell's next read() would trigger SIGTTIN and
-     * the shell itself would be stopped.
+     * Return terminal to the shell regardless of whether the job exited
+     * or was stopped.  Without this, the shell's next read() triggers
+     * SIGTTIN and the shell stops itself.
      */
     sys_tcsetpgrp(STDIN_FD, g_shell_pgid);
+
+    /*
+     * Phase 5: convert raw wait4 status to POSIX $? exit code and store
+     * in g_last_status so tokenizer.c can expand $?.
+     *
+     * Conversion rules (POSIX XBD 2.8.2):
+     *
+     *   WIFEXITED(s)   : exit code = WEXITSTATUS(s)        (0–255)
+     *   WIFSIGNALED(s) : exit code = 128 + WTERMSIG(s)     (POSIX convention)
+     *   WIFSTOPPED(s)  : job still alive; exit_code = 0    (not a final status)
+     *
+     * The "128 + sig" convention is not mandated by the letter of POSIX
+     * but is required in practice: every script that does
+     *   kill -TERM pid; test $? -gt 128
+     * relies on it.  bash, dash, ksh, zsh all use 128+sig.
+     */
+    int exit_code = 0;
+
+    if (WIFEXITED(last_raw_status))
+    {
+        exit_code = WEXITSTATUS(last_raw_status);
+    }
+    else if (WIFSIGNALED(last_raw_status))
+    {
+        exit_code = 128 + WTERMSIG(last_raw_status);
+    }
+
+    g_last_status = exit_code;
 
     /* ── Handle stopped foreground job ──────────────────────────────── */
     if (all_stopped)
     {
-        /*
-         * Move the stopped pipeline to the job table so the user can
-         * resume it with fg %N or bg %N.
-         */
         char cmd_str[MAX_INPUT];
         build_cmd_string(pipeline, cmd_str, MAX_INPUT);
 
@@ -434,8 +454,8 @@ int execute_pipeline(Pipeline *pipeline)
         if (j != 0)
             print_job_line(j, 1);
 
-        return last_status;
+        return exit_code;
     }
 
-    return last_status;
+    return exit_code;
 }

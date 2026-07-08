@@ -1,11 +1,12 @@
 #==============================================================================
-# Makefile — Educational POSIX Shell (Phase 4)
+# Makefile — Educational POSIX Shell (Phase 5)
 #
 # Build flags:
 #   -nostdlib       do not link libc or standard startup files
 #   -static         produce a self-contained binary
 #   -ffreestanding  no hosted-environment assumptions
 #   -Wall           enable common warnings
+#   -g              include debug symbols (for strace / gdb analysis)
 #==============================================================================
 
 CC     = gcc
@@ -16,6 +17,7 @@ SRC = \
     shell/shell_loop.c      \
     kernel/wrappers.c       \
     utils/string.c          \
+    env/env.c               \
     parser/tokenizer.c      \
     parser/parser.c         \
     executor/executor.c     \

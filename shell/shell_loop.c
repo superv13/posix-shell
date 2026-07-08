@@ -1,4 +1,4 @@
-// shell/shell_loop.c — Phase 4 main shell loop
+// shell/shell_loop.c — Phase 5 main shell loop
 
 #include "../include/wrappers.h"
 #include "../include/constants.h"
@@ -10,45 +10,61 @@
 #include "../signals/signals.h"
 #include "../jobs/jobs.h"
 #include "../trace/trace.h"
+#include "../env/env.h"
 
 /*
 ===============================================================================
 shell_main
 
-Startup sequence (Phase 4):
+Phase 5 additions over Phase 4:
 
-    1. Parse --trace flag from argv
-    2. setsid()         — create new session (required for PTY job control)
-    3. TIOCSCTTY        — claim PTY slave (fd 0) as controlling terminal
-    4. setpgid(0, 0)    — put shell in its own process group
-    5. g_shell_pgid = getpid()
-    6. setup_shell_signals()
-    7. init_job_table()
-    8. Loop:
-         a. reap_background_jobs() always (catches done/stopped jobs
-            even when SIGCHLD was missed or SA_RESTART ate the flag)
+    - Accepts a third parameter, envp, from _start.
+    - Stores it in g_environ (env/env.c) so every execve() call can pass
+      the real environment to child processes.
+    - Stores the return value of execute_pipeline() into g_last_status
+      (via executor.c, which does it directly), enabling $? expansion.
+    - Updates g_last_status = 0 after builtin dispatch (builtins succeed).
+
+Why g_environ is set here and not in _start:
+    _start is a naked function with no C variables.  It passes envp to
+    shell_main via the rdx register (System V AMD64 ABI third argument).
+    shell_main is the first normal C function and the right place to store
+    the pointer before any command runs.
+
+Startup sequence (Phase 5):
+
+    1. g_environ  = envp           ← Phase 5: capture environment
+    2. Parse --trace flag from argv
+    3. setsid()
+    4. TIOCSCTTY
+    5. setpgid(0, 0)
+    6. g_shell_pgid = getpid()
+    7. setup_shell_signals()
+    8. init_job_table()
+    9. Loop:
+         a. reap_background_jobs()
          b. print prompt
          c. read input
-         d. tokenize / parse
-         e. dispatch builtins or execute_pipeline
-
-Why setsid + TIOCSCTTY are needed:
-    When posixsh is launched as a subprocess (e.g. from Python's pty
-    module in tests), it inherits the parent's session.  tcsetpgrp()
-    requires the calling process to be in the same session as the
-    terminal's controlling process — if posixsh is in Python's session
-    and the PTY slave is NOT Python's controlling terminal, tcsetpgrp()
-    fails silently with EPERM, which means Ctrl+Z and Ctrl+C signals
-    never reach the foreground job's process group.
-
-    setsid() creates a fresh session.  ioctl(0, TIOCSCTTY, 0) then
-    makes the PTY slave (fd 0) the controlling terminal of that session.
-    After these two calls tcsetpgrp() works correctly.
+         d. tokenize (Phase 5: $? and $$ expanded here)
+         e. parse
+         f. dispatch builtins or execute_pipeline
+            (Phase 5: executor passes g_environ to execve, updates g_last_status)
 ===============================================================================
 */
 
-void shell_main(int argc, char **argv)
+void shell_main(int argc, char **argv, char **envp)
 {
+    /* ── Phase 5: capture environment ────────────────────────────────── */
+    /*
+     * Store the envp pointer from the kernel stack so every child process
+     * can be exec'd with the full environment.
+     *
+     * g_environ is used in two places:
+     *   1. executor.c: sys_execve(path, cmd->argv, g_environ)
+     *   2. executor/path.c: env_get("PATH") to search the real PATH
+     */
+    g_environ = envp;
+
     /* ── Step 1: parse --trace flag ─────────────────────────────────── */
     for (int i = 1; i < argc; i++)
     {
@@ -64,12 +80,10 @@ void shell_main(int argc, char **argv)
      * SYSCALL: setsid()
      *
      * Makes this process the leader of a new session with no controlling
-     * terminal.  Required so that the next call (TIOCSCTTY) can claim
-     * the PTY slave as the controlling terminal of OUR session, not the
-     * parent's session.
+     * terminal.  Required so TIOCSCTTY below can claim the PTY slave as
+     * OUR session's controlling terminal.
      *
-     * Fails (returns -1) if the process is already a process group
-     * leader — this is harmless; we proceed regardless.
+     * Fails harmlessly if we are already a process group leader.
      */
     sys_setsid();
 
@@ -77,12 +91,9 @@ void shell_main(int argc, char **argv)
     /*
      * SYSCALL: ioctl(0, TIOCSCTTY, 0)
      *
-     * fd 0 (stdin) is the PTY slave.  After setsid() our session has no
-     * controlling terminal.  This ioctl attaches fd 0 as the controlling
-     * terminal.  Once done, tcsetpgrp(0, pgid) works correctly.
-     *
-     * If the shell is run from a real terminal (not a PTY subprocess),
-     * this either succeeds (no-op) or fails harmlessly.
+     * After setsid(), our session has no controlling terminal.
+     * This ioctl makes fd 0 (PTY slave) the controlling terminal so that
+     * tcsetpgrp() works correctly for job control.
      */
     sys_tiocsctty(0);
 
@@ -90,12 +101,8 @@ void shell_main(int argc, char **argv)
     /*
      * SYSCALL: setpgid(0, 0)
      *
-     * Creates a new process group with PGID = shell PID.
-     * This is the group tcsetpgrp restores to after each foreground job.
-     *
-     * Must be called AFTER setsid() — setsid() already resets the
-     * process group, but the explicit setpgid(0,0) is safe and makes
-     * the intent clear.
+     * PGID = PID after this call.
+     * This is the group we restore terminal control to after each job.
      */
     sys_setpgid(0, 0);
 
@@ -103,16 +110,12 @@ void shell_main(int argc, char **argv)
     /*
      * SYSCALL: getpid()
      *
-     * After setpgid(0,0), PGID == PID, so getpid() gives us both.
+     * After setpgid(0,0), PGID == PID.
+     * g_shell_pgid is also used by the $$ tokenizer expansion.
      */
     g_shell_pgid = sys_getpid();
 
     /* ── Step 6: install signal handlers ─────────────────────────────── */
-    /*
-     * After this call:
-     *   SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU → SIG_IGN
-     *   SIGCHLD → sigchld_handler (sets g_sigchld_flag, SA_RESTART)
-     */
     setup_shell_signals();
 
     /* ── Step 7: initialise job table ────────────────────────────────── */
@@ -123,22 +126,6 @@ void shell_main(int argc, char **argv)
     while (1)
     {
         /* ── Reap background jobs ────────────────────────────────────── */
-        /*
-         * Always call reap_background_jobs(), not only when g_sigchld_flag
-         * is set.  This handles two edge cases:
-         *
-         *   a) SA_RESTART caused the SIGCHLD to restart wait4() inside
-         *      execute_pipeline before the flag was checked here, so the
-         *      flag was never set even though a child exited.
-         *
-         *   b) A background job finished between two prompt iterations
-         *      without firing a second SIGCHLD.
-         *
-         * reap_background_jobs() uses WNOHANG so it never blocks.
-         * Clearing g_sigchld_flag first avoids a race where it is set
-         * during the call — we will pick up the remaining children on the
-         * next iteration.
-         */
         g_sigchld_flag = 0;
         reap_background_jobs();
 
@@ -154,6 +141,11 @@ void shell_main(int argc, char **argv)
         buffer[bytes] = '\0';
 
         /* ── Tokenise ────────────────────────────────────────────────── */
+        /*
+         * Phase 5: tokenize() now expands $? and $$ in-place before the
+         * parser sees them.  g_last_status and g_shell_pgid are read from
+         * globals visible to tokenizer.c via env.h and signals.h.
+         */
         Token tokens[MAX_TOKENS];
         int   token_count = 0;
 
@@ -166,20 +158,34 @@ void shell_main(int argc, char **argv)
         {
             char err[] = "posixsh: syntax error\n";
             sys_write(2, err, my_strlen(err));
+            g_last_status = 2;      /* POSIX: syntax errors set $? = 2 */
             continue;
         }
 
         if (pipeline.count == 0) continue;  /* blank line */
 
         /* ── Builtin dispatch ────────────────────────────────────────── */
+        /*
+         * Single builtin in no-pipe context runs directly in the shell.
+         * Phase 5: set g_last_status = 0 on successful builtin execution.
+         * (Future: builtins could return their own status codes.)
+         */
         if (pipeline.count == 1 && pipeline.commands[0].is_builtin)
         {
             execute_builtin(&pipeline.commands[0]);
+            g_last_status = 0;
             continue;
         }
 
         /* ── Execute pipeline ────────────────────────────────────────── */
+        /*
+         * Phase 5: execute_pipeline() now:
+         *   - passes g_environ to execve() so children inherit the env
+         *   - reads PATH via env_get("PATH") for command resolution
+         *   - updates g_last_status with the processed exit code
+         */
         execute_pipeline(&pipeline);
+        /* g_last_status was already updated inside execute_pipeline() */
     }
 
     sys_exit(0);
