@@ -137,11 +137,18 @@ void setup_shell_signals(void)
     install_handler(SIGTTOU, SIG_IGN, ign_flags);
 
     /*
-     * SIGCHLD: use sigchld_handler with SA_RESTART.
+     * SIGCHLD: use sigchld_handler WITH SA_RESTART.
      *
-     * SA_RESTART makes the kernel retry the blocked read() in
-     * shell_main() automatically when SIGCHLD fires, instead of
-     * returning EINTR and forcing us to handle the error case.
+     * SA_RESTART makes the kernel transparently restart the blocked
+     * sys_read() after SIGCHLD fires.  The shell loop then reaps
+     * finished children at the top of the NEXT iteration — after the
+     * user presses Enter — which is where the "Done" notification
+     * should appear (just before the next prompt).
+     *
+     * Zombies are collected promptly because reap_background_jobs()
+     * runs at the top of every loop iteration, and the g_sigchld_flag
+     * check in the loop body triggers an immediate re-check whenever
+     * the flag was set while read() was running.
      */
     install_handler(SIGCHLD, sigchld_handler, SA_RESTART);
 }

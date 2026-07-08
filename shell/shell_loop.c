@@ -134,6 +134,13 @@ void shell_main(int argc, char **argv, char **envp)
         sys_write(1, prompt, my_strlen(prompt));
 
         /* ── Read input ──────────────────────────────────────────────── */
+        /*
+         * SA_RESTART on SIGCHLD means the kernel transparently restarts
+         * this read() if a child exits while we're blocked.  The loop
+         * will call reap_background_jobs() at the top of the NEXT
+         * iteration, printing "Done" just before the next prompt \u2014
+         * which is the correct user-visible timing.
+         */
         long bytes = sys_read(0, buffer, (long)(sizeof(buffer) - 1));
 
         if (bytes <= 0) break;      /* EOF (Ctrl+D) or read error */
