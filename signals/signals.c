@@ -5,6 +5,7 @@
 
 #include "signals.h"
 #include "../include/wrappers.h"
+#include "../trace/trace.h"
 
 /*===========================================================================
  Global state definitions
@@ -91,6 +92,7 @@ static void install_handler(
     sa.sa_restorer = arch_signal_restorer;  /* from arch/x86_64/arch.h */
     sa.sa_mask.sig[0] = 0;                 /* block nothing extra      */
 
+    trace_sigaction(signum);
     sys_sigaction(signum, &sa, 0);
 }
 
@@ -141,7 +143,7 @@ void setup_shell_signals(void)
      * shell_main() automatically when SIGCHLD fires, instead of
      * returning EINTR and forcing us to handle the error case.
      */
-    install_handler(SIGCHLD, sigchld_handler, SA_RESTART | SA_RESTORER);
+    install_handler(SIGCHLD, sigchld_handler, SA_RESTART);
 }
 
 
