@@ -39,9 +39,25 @@ static int execute_line(char *buf)
 
     if (pipeline.count == 1 && pipeline.commands[0].is_builtin)
     {
-        execute_builtin(&pipeline.commands[0]);
-        g_last_status = 0;
-        return 0;
+        Command *cmd = &pipeline.commands[0];
+        /*
+         * Fast path: only run the builtin directly when there are no
+         * redirections.  If the builtin has input_file or output_file
+         * (e.g. "echo hello > /tmp/out"), we must go through
+         * execute_pipeline() so the executor sets up the dup2() calls
+         * before running the builtin.
+         *
+         * Without this check, "echo hello > file" would call
+         * execute_builtin() before any file is opened, so the file
+         * would never be created.
+         */
+        int has_redir = cmd->input_file[0] != '\0' || cmd->output_file[0] != '\0';
+        if (!has_redir)
+        {
+            execute_builtin(cmd);
+            g_last_status = 0;
+            return 0;
+        }
     }
 
     execute_pipeline(&pipeline);
