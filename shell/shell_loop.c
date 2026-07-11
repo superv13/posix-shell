@@ -13,6 +13,42 @@
 #include "../env/env.h"
 
 /*
+ * execute_string
+ *
+ * Shared execution engine used by both -c mode and the interactive loop.
+ * Tokenises, parses, and runs a single null-terminated input line in-place.
+ * Returns 0 on success, -1 on syntax error, 1 on "exit" builtin.
+ */
+static int execute_line(char *buf)
+{
+    Token tokens[MAX_TOKENS];
+    int   token_count = 0;
+
+    tokenize(buf, tokens, &token_count);
+
+    Pipeline pipeline;
+    if (parse(tokens, token_count, &pipeline) == -1)
+    {
+        char err[] = "posixsh: syntax error\n";
+        sys_write(2, err, my_strlen(err));
+        g_last_status = 2;
+        return -1;
+    }
+
+    if (pipeline.count == 0) return 0;   /* blank line */
+
+    if (pipeline.count == 1 && pipeline.commands[0].is_builtin)
+    {
+        execute_builtin(&pipeline.commands[0]);
+        g_last_status = 0;
+        return 0;
+    }
+
+    execute_pipeline(&pipeline);
+    return 0;
+}
+
+/*
 ===============================================================================
 shell_main
 
@@ -65,15 +101,71 @@ void shell_main(int argc, char **argv, char **envp)
      */
     g_environ = envp;
 
-    /* ── Step 1: parse --trace flag ─────────────────────────────────── */
+    /* ── Step 1: parse --trace and -c flags ─────────────────────────── */
+    /*
+     * -c STRING  (POSIX-required)
+     *   Execute STRING as a single script and exit immediately.
+     *   This is the flag used by bash/dash for non-interactive invocation,
+     *   e.g.  posixsh -c "echo hello"
+     *
+     *   In -c mode we skip:
+     *     - setsid / TIOCSCTTY / setpgid  (no terminal needed)
+     *     - the interactive read() loop   (we run the string, then exit)
+     *   This makes posixsh -c directly comparable to bash -c for both
+     *   performance benchmarks (perf_measure.sh) and syscall counts
+     *   (strace_compare.sh).
+     */
+    char *c_script = (char *)0;  /* non-NULL if -c was given */
+
     for (int i = 1; i < argc; i++)
     {
         if (my_strcmp(argv[i], "--trace") == 0)
         {
             g_trace_mode = 1;
-            break;
+        }
+        else if (my_strcmp(argv[i], "-c") == 0 && i + 1 < argc)
+        {
+            c_script = argv[i + 1];
+            i++;   /* consumed the next argument */
         }
     }
+
+    /* ── -c mode: run script and exit ───────────────────────────────── */
+    /*
+     * When -c is given we do NOT set up a new session or claim a terminal.
+     * We just need the job table and signal handlers for pipeline execution.
+     *
+     * We walk through the script line-by-line, using \n as the delimiter,
+     * so a multi-command -c string works correctly:
+     *   posixsh -c $'echo a\necho b'
+     */
+    if (c_script)
+    {
+        g_shell_pgid = sys_getpid();
+        setup_shell_signals();
+        init_job_table();
+
+        /* Walk through the script one newline-delimited line at a time */
+        char line_buf[MAX_INPUT];
+        const char *src = c_script;
+
+        while (*src)
+        {
+            /* Copy up to the next '\n' or end of string */
+            int len = 0;
+            while (*src && *src != '\n' && len < (int)(sizeof(line_buf) - 1))
+                line_buf[len++] = *src++;
+            if (*src == '\n') src++;  /* skip the newline */
+            line_buf[len] = '\0';
+
+            if (len > 0)
+                execute_line(line_buf);
+        }
+
+        sys_exit(g_last_status);
+    }
+
+    /* ── Interactive mode (original behaviour) ───────────────────────── */
 
     /* ── Step 2: create a new session ───────────────────────────────── */
     /*
@@ -138,7 +230,7 @@ void shell_main(int argc, char **argv, char **envp)
          * SA_RESTART on SIGCHLD means the kernel transparently restarts
          * this read() if a child exits while we're blocked.  The loop
          * will call reap_background_jobs() at the top of the NEXT
-         * iteration, printing "Done" just before the next prompt \u2014
+         * iteration, printing "Done" just before the next prompt —
          * which is the correct user-visible timing.
          */
         long bytes = sys_read(0, buffer, (long)(sizeof(buffer) - 1));
@@ -147,52 +239,7 @@ void shell_main(int argc, char **argv, char **envp)
 
         buffer[bytes] = '\0';
 
-        /* ── Tokenise ────────────────────────────────────────────────── */
-        /*
-         * Phase 5: tokenize() now expands $? and $$ in-place before the
-         * parser sees them.  g_last_status and g_shell_pgid are read from
-         * globals visible to tokenizer.c via env.h and signals.h.
-         */
-        Token tokens[MAX_TOKENS];
-        int   token_count = 0;
-
-        tokenize(buffer, tokens, &token_count);
-
-        /* ── Parse ───────────────────────────────────────────────────── */
-        Pipeline pipeline;
-
-        if (parse(tokens, token_count, &pipeline) == -1)
-        {
-            char err[] = "posixsh: syntax error\n";
-            sys_write(2, err, my_strlen(err));
-            g_last_status = 2;      /* POSIX: syntax errors set $? = 2 */
-            continue;
-        }
-
-        if (pipeline.count == 0) continue;  /* blank line */
-
-        /* ── Builtin dispatch ────────────────────────────────────────── */
-        /*
-         * Single builtin in no-pipe context runs directly in the shell.
-         * Phase 5: set g_last_status = 0 on successful builtin execution.
-         * (Future: builtins could return their own status codes.)
-         */
-        if (pipeline.count == 1 && pipeline.commands[0].is_builtin)
-        {
-            execute_builtin(&pipeline.commands[0]);
-            g_last_status = 0;
-            continue;
-        }
-
-        /* ── Execute pipeline ────────────────────────────────────────── */
-        /*
-         * Phase 5: execute_pipeline() now:
-         *   - passes g_environ to execve() so children inherit the env
-         *   - reads PATH via env_get("PATH") for command resolution
-         *   - updates g_last_status with the processed exit code
-         */
-        execute_pipeline(&pipeline);
-        /* g_last_status was already updated inside execute_pipeline() */
+        execute_line(buffer);
     }
 
     sys_exit(0);

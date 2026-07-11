@@ -2,6 +2,7 @@
 
 #include "builtins.h"
 #include "../utils/string.h"
+#include "echo.h"
 #include "exit.h"
 #include "pwd.h"
 #include "cd.h"
@@ -35,6 +36,16 @@ int execute_builtin(Command *cmd)
     if (my_strcmp(name, "exit") == 0)
     {
         builtin_exit();
+        return 1;
+    }
+
+    if (my_strcmp(name, "echo") == 0)
+    {
+        /*
+         * echo: zero fork/exec — replaces open(PATH...) = ENOENT chain.
+         * Eliminates ~9 errors and ~60 syscalls per echo invocation.
+         */
+        builtin_echo(cmd);
         return 1;
     }
 

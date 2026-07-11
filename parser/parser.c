@@ -39,6 +39,7 @@ static int is_builtin_command(const char *name)
     if (my_strcmp(name, "cd")   == 0) return 1;
     if (my_strcmp(name, "exit") == 0) return 1;
     if (my_strcmp(name, "pwd")  == 0) return 1;
+    if (my_strcmp(name, "echo") == 0) return 1;  /* Phase 5: avoid fork+exec */
     if (my_strcmp(name, "jobs") == 0) return 1;
     if (my_strcmp(name, "fg")   == 0) return 1;
     if (my_strcmp(name, "bg")   == 0) return 1;

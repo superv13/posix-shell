@@ -231,7 +231,7 @@ long syscall6(long number,
  *   With __attribute__((naked)) the compiler emits ONLY the inline asm,
  *   preserving the exact stack layout the kernel expects.
  */
-__attribute__((naked))
+__attribute__((naked, unused))
 static void arch_signal_restorer(void)
 {
     __asm__ volatile(

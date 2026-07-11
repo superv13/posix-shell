@@ -23,6 +23,7 @@ SRC = \
     executor/executor.c     \
     executor/path.c         \
     builtins/builtins.c     \
+    builtins/echo.c         \
     builtins/cd.c           \
     builtins/pwd.c          \
     builtins/exit.c         \
