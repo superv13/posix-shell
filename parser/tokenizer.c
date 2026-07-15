@@ -11,6 +11,14 @@
 //   a comment.  Everything from '#' to the end of the line is ignored.
 //   '#' that appears mid-word (STATE_IN_WORD) is treated as a literal
 //   character — this matches POSIX: "he#llo" is one word, not a comment.
+//
+// Step 2 — Tilde expansion (POSIX XBD 2.6.1):
+//   '~' at the very start of an unquoted word expands to $HOME.
+//   Specifically:
+//     ~        alone (followed by whitespace, metacharacter, or \0) → $HOME
+//     ~/path   at word start followed by '/'                        → $HOME/path
+//   '~' anywhere else (mid-word, inside quotes) is left as a literal.
+//   If $HOME is unset, '~' is left unexpanded (POSIX XBD 2.6.1, line 3).
 
 #include "tokenizer.h"
 #include "../utils/string.h"
@@ -97,6 +105,87 @@ static void expand_integer(Token *tok, int *len, long value)
     {
         add_char_to_word(tok, digits[--n], len);
     }
+}
+
+/*
+ * expand_tilde
+ *
+ * Called from STATE_NORMAL when the tokenizer sees '~' as the very first
+ * character of a new word.
+ *
+ * POSIX XBD 2.6.1 — Tilde Expansion:
+ *   "If a word begins with an unquoted <tilde> character, all of the
+ *   characters preceding the first unquoted <slash> in the word [...]
+ *   constitute a tilde prefix."
+ *
+ * We handle the common shell case: a bare tilde prefix with no login name
+ * (i.e. "~" or "~/..."), which expands to the value of HOME.
+ *
+ * Parameters:
+ *   input    : full input buffer
+ *   i        : current index (pointing AT the '~')
+ *   tok      : current token being built (still empty at call time)
+ *   word_len : current token length (0 at call time)
+ *
+ * Returns:
+ *   1  if tilde was expanded — *i is advanced past the '~'
+ *   0  if '~' is not a valid tilde prefix (leave it as a literal)
+ *
+ * Does NOT advance past the '/' or the rest of the path; the normal
+ * STATE_IN_WORD loop handles those characters after we return.
+ */
+static int expand_tilde(
+    const char *input,
+    int        *i,
+    Token      *tok,
+    int        *word_len
+)
+{
+    char next = input[*i + 1];
+
+    /*
+     * POSIX tilde-prefix without login name:
+     *   ~ alone       : next char is \0, \n, space, tab, or a shell metachar
+     *   ~/path        : next char is '/'
+     *
+     * Any other character after '~' (e.g. "~user" or "~1") would be a
+     * login-name tilde prefix.  We do not implement login-name lookup
+     * (requires /etc/passwd access which needs libc).  Leave those as
+     * literal '~'.
+     */
+    if (next != '/' && next != '\0' && next != '\n' &&
+        next != ' '  && next != '\t' &&
+        next != '|'  && next != '<'  && next != '>' &&
+        next != '&'  && next != ';')
+    {
+        return 0;   /* not a bare tilde prefix — treat '~' as literal */
+    }
+
+    /*
+     * Look up $HOME.
+     *
+     * POSIX XBD 2.6.1:
+     *   "If HOME is unset, the results are unspecified."
+     * We choose the most useful behaviour: leave '~' unexpanded.
+     */
+    const char *home = env_get("HOME");
+    if (home == 0)
+    {
+        return 0;   /* HOME unset — leave '~' as literal */
+    }
+
+    /*
+     * Copy every character of $HOME into the token buffer.
+     * add_char_to_word() enforces the MAX_TOKEN_LEN limit, so this
+     * cannot overflow even with a very long HOME path.
+     */
+    for (int k = 0; home[k] != '\0'; k++)
+    {
+        add_char_to_word(tok, home[k], word_len);
+    }
+
+    *i += 1;    /* skip past '~'; the '/' and rest are handled by the caller */
+    return 1;
 }
 
 /*
@@ -247,6 +336,26 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                 current_token.type = TOKEN_WORD;
                 if (!try_dollar_expansion(input, &i, &current_token, &word_len)) {
                     /* Not $? or $$ — treat '$' as a literal character */
+                    add_char_to_word(&current_token, c, &word_len);
+                    i++;
+                }
+            } else if (c == '~') {
+                /*
+                 * Step 2 — Tilde expansion (POSIX XBD 2.6.1).
+                 *
+                 * '~' at the start of an unquoted word may expand to $HOME.
+                 * expand_tilde() decides whether expansion applies and, if so,
+                 * fills the token buffer with the HOME value and advances *i
+                 * past the '~'.  On return we enter STATE_IN_WORD so that any
+                 * trailing characters (e.g. the '/foo' in '~/foo') continue
+                 * building the same token.
+                 *
+                 * If expand_tilde() returns 0 (HOME unset, or not a bare tilde
+                 * prefix), we fall through and add '~' as a literal character.
+                 */
+                state = STATE_IN_WORD;
+                current_token.type = TOKEN_WORD;
+                if (!expand_tilde(input, &i, &current_token, &word_len)) {
                     add_char_to_word(&current_token, c, &word_len);
                     i++;
                 }
