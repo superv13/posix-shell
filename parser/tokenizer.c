@@ -5,6 +5,12 @@
 //   - $$ expansion: replaced with the decimal value of g_shell_pgid
 //   - Both expansions work in unquoted words and inside double quotes.
 //   - Neither expansion happens inside single quotes (POSIX rule).
+//
+// Step 1 — Comment handling (POSIX XBD 2.3):
+//   '#' appearing in STATE_NORMAL (i.e. not inside a word or quote) starts
+//   a comment.  Everything from '#' to the end of the line is ignored.
+//   '#' that appears mid-word (STATE_IN_WORD) is treated as a literal
+//   character — this matches POSIX: "he#llo" is one word, not a comment.
 
 #include "tokenizer.h"
 #include "../utils/string.h"
@@ -244,6 +250,22 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                     add_char_to_word(&current_token, c, &word_len);
                     i++;
                 }
+            } else if (c == '#') {
+                /*
+                 * POSIX XBD 2.3 — Comment:
+                 *   A word beginning with '#' that is unquoted introduces
+                 *   a comment.  The comment runs to the end of the line.
+                 *   We emit TOKEN_EOF here so the parser sees a complete
+                 *   (possibly empty) command followed by end-of-input —
+                 *   identical to an empty line.
+                 *
+                 *   '#' mid-word (STATE_IN_WORD) does NOT reach this
+                 *   branch; it falls through to the else below and is
+                 *   added as a literal character.  That is correct POSIX
+                 *   behaviour: "echo he#llo" prints "he#llo".
+                 */
+                emit_token(tokens, token_count, TOKEN_EOF, NULL, NULL);
+                break;
             } else {
                 state = STATE_IN_WORD;
                 current_token.type = TOKEN_WORD;
