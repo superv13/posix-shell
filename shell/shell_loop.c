@@ -60,104 +60,155 @@ static void run_one_pipeline(Pipeline *pipeline)
 }
 
 /*
- * execute_line  (Step 4 — AND/OR list evaluation)
+ * SepType — kind of separator that ended a raw input segment
+ */
+typedef enum {
+    SEP_NONE,       /* \0 or \n  — end of input, no more segments */
+    SEP_AND,        /* &&        — run next only if prev exited 0  */
+    SEP_OR,         /* ||        — run next only if prev failed     */
+    SEP_SEMICOLON   /* ;         — always run next                  */
+} SepType;
+
+/*
+ * find_segment
  *
- * Tokenises the input line once, then walks the flat token array
- * segment by segment, splitting on TOKEN_AND ('&&'), TOKEN_OR ('||'),
- * and TOKEN_SEMICOLON (';').  Each segment is a single pipeline.
+ * Scans the raw input buffer starting at *pos, respecting single- and
+ * double-quote contexts, until an unquoted separator (&&, ||, ;, \n, \0)
+ * is found.  Copies the segment text (without the separator) into seg_buf
+ * (null-terminated, at most seg_max-1 chars).
+ *
+ * Why scan the RAW buffer and not the token array:
+ *   If we tokenize the whole line first and then slice token sub-arrays,
+ *   every '$?' in every segment is expanded to the same value — the one
+ *   g_last_status held BEFORE any command in the line ran.  That means
+ *   "ls /bad ; echo $?" always prints 0 (or whatever the previous line left).
+ *
+ *   By scanning the raw buffer and calling tokenize() fresh for each
+ *   segment, '$?' is expanded AFTER the previous segment has run, so it
+ *   correctly reflects that segment's exit status.  This matches the
+ *   behaviour of bash, dash, and every POSIX-conforming shell.
+ *
+ * Parameters:
+ *   input   : full input line (null-terminated)
+ *   pos     : in/out — start position on entry; updated past the separator
+ *   seg_buf : output — segment text, null-terminated, no separator
+ *   seg_max : size of seg_buf
+ *   sep     : output — which separator ended the segment
+ *
+ * Returns the number of characters copied into seg_buf (may be 0).
+ */
+static int find_segment(const char *input, int *pos,
+                        char *seg_buf, int seg_max, SepType *sep)
+{
+    int  p   = *pos;
+    int  len = 0;
+    char q   = 0;    /* current quote char: '\'' or '"', 0 = unquoted */
+
+    while (input[p] != '\0' && input[p] != '\n')
+    {
+        char c = input[p];
+
+        if (q)
+        {
+            /* Inside a quote — only the matching close quote exits */
+            if (c == q) q = 0;
+            if (len < seg_max - 1) seg_buf[len++] = c;
+            p++;
+            continue;
+        }
+
+        /* Unquoted: check for two-char separators first */
+        if (c == '&' && input[p + 1] == '&')
+        {
+            *sep = SEP_AND;
+            p += 2;
+            goto done;
+        }
+        if (c == '|' && input[p + 1] == '|')
+        {
+            *sep = SEP_OR;
+            p += 2;
+            goto done;
+        }
+        if (c == ';')
+        {
+            *sep = SEP_SEMICOLON;
+            p += 1;
+            goto done;
+        }
+
+        /* Start of a quote */
+        if (c == '\'' || c == '"') q = c;
+
+        if (len < seg_max - 1) seg_buf[len++] = c;
+        p++;
+    }
+
+    *sep = SEP_NONE;
+
+done:
+    seg_buf[len] = '\0';
+    *pos = p;
+    return len;
+}
+
+/*
+ * execute_line  (Steps 4 + 5 — AND/OR list with per-segment expansion)
+ *
+ * Uses find_segment() to split the raw input line into pipeline segments
+ * at unquoted &&, ||, ;, or end-of-line boundaries.  Each segment is
+ * tokenised and parsed independently AFTER the previous segment's pipeline
+ * has run.  This ensures that $? and $VAR expansions in each segment see
+ * the up-to-date shell state (g_last_status, g_environ) at execution time,
+ * not the stale state from before the line started.
  *
  * Short-circuit rules (POSIX XBD 2.9.3):
- *   &&  — execute the next pipeline only if the previous one exited 0.
- *   ||  — execute the next pipeline only if the previous one exited non-zero.
- *   ;   — always execute the next pipeline (unconditional sequencing).
+ *   &&  next pipeline runs only if g_last_status == 0
+ *   ||  next pipeline runs only if g_last_status != 0
+ *   ;   next pipeline always runs
  *
- * How segmentation works without changing parse()'s signature:
- *   We scan forward to find the next AND/OR/SEMICOLON/EOF boundary.
- *   We copy that slice to a small stack buffer and append TOKEN_EOF,
- *   giving parse() a well-formed self-contained token stream.
- *   argv[] pointers inside the resulting Pipeline point into the slice
- *   buffer, which outlives every call to run_one_pipeline().
- *
- * Example — "make && ./posixsh || echo failed":
- *   Segment 0: ["make"] ,           join_op=EOF  → always run
- *   Segment 1: ["./posixsh"],        join_op=&&   → run only if make exited 0
- *   Segment 2: ["echo", "failed"],   join_op=||   → run only if ./posixsh failed
+ * Example — "ls /bad ; echo $?":
+ *   Segment 0 raw: "ls /bad "  → tokenise → run → g_last_status = 2
+ *   Segment 1 raw: " echo $?"  → tokenise ($? now = 2) → run → prints "2"
  */
 static int execute_line(char *buf)
 {
-    Token tokens[MAX_TOKENS];
-    int   token_count = 0;
+    int     pos   = 0;
+    SepType join  = SEP_NONE;   /* first segment always runs */
+    int     first = 1;
 
-    tokenize(buf, tokens, &token_count);
-
-    /*
-     * join_op: the operator preceding the CURRENT segment.
-     *   TOKEN_EOF       = first segment, always execute (no preceding op).
-     *   TOKEN_AND       = execute only if g_last_status == 0.
-     *   TOKEN_OR        = execute only if g_last_status != 0.
-     *   TOKEN_SEMICOLON = always execute.
-     */
-    TokenType join_op = TOKEN_EOF;
-    int pos = 0;
-
-    while (pos < token_count)
+    while (1)
     {
-        /* Stop at a bare EOF or NEWLINE with nothing left to do */
-        if (tokens[pos].type == TOKEN_EOF ||
-            tokens[pos].type == TOKEN_NEWLINE)
-            break;
+        char    seg[MAX_INPUT];
+        SepType sep;
+        int     seg_len = find_segment(buf, &pos, seg, MAX_INPUT, &sep);
 
-        /* ── Find end of this pipeline segment ──────────────────────── */
-        /*
-         * Scan forward until we hit a list operator or end-of-input.
-         * seg_end lands ON the separator token (or past the last token).
-         */
-        int seg_start = pos;
-        int seg_end   = pos;
-        while (seg_end < token_count)
-        {
-            TokenType t = tokens[seg_end].type;
-            if (t == TOKEN_AND || t == TOKEN_OR  ||
-                t == TOKEN_SEMICOLON              ||
-                t == TOKEN_NEWLINE || t == TOKEN_EOF)
-                break;
-            seg_end++;
-        }
+        /* End of input with no segment */
+        if (seg_len == 0 && sep == SEP_NONE) break;
 
-        int seg_len = seg_end - seg_start;   /* tokens in this segment */
-
-        /* ── Short-circuit evaluation ────────────────────────────────── */
+        /* ── Short-circuit ───────────────────────────────────────────── */
         int skip = 0;
-        if (join_op == TOKEN_AND && g_last_status != 0) skip = 1;
-        if (join_op == TOKEN_OR  && g_last_status == 0) skip = 1;
+        if (!first)
+        {
+            if (join == SEP_AND && g_last_status != 0) skip = 1;
+            if (join == SEP_OR  && g_last_status == 0) skip = 1;
+        }
+        first = 0;
 
         if (!skip && seg_len > 0)
         {
             /*
-             * Build a copy of the segment with a trailing TOKEN_EOF.
+             * Tokenise this segment fresh.
              *
-             * Why copy and not pass &tokens[seg_start] directly:
-             *   parse() walks until it sees TOKEN_EOF/NEWLINE/SEMICOLON.
-             *   Without an EOF sentinel, it would read into the next
-             *   segment's tokens (e.g. into the '&&' token), which would
-             *   either be silently skipped or misinterpreted.
-             *   A local copy with appended TOKEN_EOF gives parse() a
-             *   clean, isolated view of this one pipeline.
-             *
-             * argv[] pointers inside Pipeline point into seg_tokens[].
-             * seg_tokens lives on the stack for the rest of execute_line,
-             * so they are valid through run_one_pipeline().
+             * $? and $VAR are expanded HERE, after the previous segment
+             * has updated g_last_status and the environment.
              */
-            Token seg_tokens[MAX_TOKENS];
-            int   k;
-            for (k = 0; k < seg_len && k < MAX_TOKENS - 1; k++)
-                seg_tokens[k] = tokens[seg_start + k];
-            seg_tokens[k].type     = TOKEN_EOF;
-            seg_tokens[k].value[0] = '\0';
-            int seg_count = k + 1;
+            Token tokens[MAX_TOKENS];
+            int   token_count = 0;
+            tokenize(seg, tokens, &token_count);
 
             Pipeline pipeline;
-            if (parse(seg_tokens, seg_count, &pipeline) == -1)
+            if (parse(tokens, token_count, &pipeline) == -1)
             {
                 char err[] = "posixsh: syntax error\n";
                 sys_write(2, err, my_strlen(err));
@@ -168,23 +219,13 @@ static int execute_line(char *buf)
             run_one_pipeline(&pipeline);
         }
 
-        /* ── Advance past the separator ──────────────────────────────── */
-        if (seg_end < token_count &&
-            (tokens[seg_end].type == TOKEN_AND  ||
-             tokens[seg_end].type == TOKEN_OR   ||
-             tokens[seg_end].type == TOKEN_SEMICOLON))
-        {
-            join_op = tokens[seg_end].type;
-            pos     = seg_end + 1;
-        }
-        else
-        {
-            break;   /* TOKEN_EOF, TOKEN_NEWLINE, or past end of array */
-        }
+        if (sep == SEP_NONE) break;
+        join = sep;
     }
 
     return 0;
 }
+
 
 /*
 ===============================================================================

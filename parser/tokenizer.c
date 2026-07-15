@@ -26,6 +26,14 @@
 //   A single '&' still emits TOKEN_BACKGROUND.
 //   A single '|' still emits TOKEN_PIPE.
 //   Both are recognised only in STATE_NORMAL (between words), matching POSIX.
+//
+// Step 5 — $VAR and ${VAR} expansion (POSIX XBD 2.6.2):
+//   After '$', if the next character is a letter or '_', scan an identifier
+//   (letters, digits, underscores) as the variable name, look it up via
+//   env_get(), and copy its value into the token buffer.
+//   '${VAR}' is the braced form: scan until '}', same lookup.
+//   Unset variables expand to an empty string (POSIX XBD 2.6.2).
+//   Expansion is suppressed inside single quotes (STATE_IN_SINGLE_QUOTE).
 
 #include "tokenizer.h"
 #include "../utils/string.h"
@@ -112,6 +120,27 @@ static void expand_integer(Token *tok, int *len, long value)
     {
         add_char_to_word(tok, digits[--n], len);
     }
+}
+
+/*
+ * is_var_char
+ *
+ * Returns 1 if `c` is a valid character INSIDE an environment variable name:
+ * letters (a-z, A-Z), digits (0-9), or underscore.
+ *
+ * This deliberately excludes the first character (which must be a letter or
+ * underscore — that check is done inline in try_dollar_expansion).
+ *
+ * Why not use isalnum() from <ctype.h>:
+ *   This project has zero libc dependency.  The ASCII ranges are stable and
+ *   will never change, so a direct range comparison is correct and portable.
+ */
+static int is_var_char(char c)
+{
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           (c == '_');
 }
 
 /*
@@ -209,25 +238,30 @@ static int expand_tilde(
  *
  * Modifies *i to skip past the expanded characters.
  *
- * Returns 1 if an expansion was performed ($? or $$), 0 if '$' should
- * be treated as a literal character.
+ * Returns 1 if an expansion was performed, 0 if '$' should be treated
+ * as a literal character.
  *
- * POSIX expansions handled here (Phase 5):
+ * POSIX expansions handled (Step 5 completes the set):
  *
- *   $?   Last foreground pipeline exit status (g_last_status).
- *        POSIX XBD 2.5.2: "Shall expand to the decimal value of the
- *        exit status of the most recent pipeline."
+ *   $?       Last foreground pipeline exit status (g_last_status).
+ *            POSIX XBD 2.5.2: decimal value of the most recent exit status.
  *
- *   $$   PID of the shell itself (g_shell_pgid, which equals the shell's
- *        PID after setpgid(0,0) in shell_main).
- *        POSIX XBD 2.5.2: "Shall expand to the decimal process ID of
- *        the invoking shell."
+ *   $$       PID of the shell itself (g_shell_pgid).
+ *            POSIX XBD 2.5.2: decimal process ID of the invoking shell.
  *
- * Future expansions (Phase 6+):
- *   $1..$9, $0  — positional parameters (not yet implemented)
+ *   $VAR     General environment variable (Step 5).
+ *            Next char is a letter or '_': scan the identifier, call
+ *            env_get(), copy the value.  Unset → empty string (POSIX).
+ *
+ *   ${VAR}   Braced form of general variable expansion (Step 5).
+ *            Same as $VAR but delimited by '{' ... '}'.  Useful when the
+ *            variable name is immediately followed by a letter or digit that
+ *            would otherwise extend the name: "${VAR}suffix".
+ *
+ * Not yet implemented (future work):
+ *   $0, $1..$9  — positional parameters
  *   $@, $*      — all positional parameters
  *   $#          — number of positional parameters
- *   ${VAR}      — general variable expansion
  */
 static int try_dollar_expansion(
     const char *input,
@@ -246,7 +280,7 @@ static int try_dollar_expansion(
          * g_last_status holds the POSIX-formatted exit code:
          *   0–255 for normally-exited commands,
          *   128+sig for killed-by-signal commands,
-         *   0 for background launches,
+         *   0 for background launches (POSIX: async cmd sets $? = 0),
          *   2 for syntax errors.
          */
         expand_integer(tok, word_len, (long)g_last_status);
@@ -268,6 +302,99 @@ static int try_dollar_expansion(
          */
         expand_integer(tok, word_len, g_shell_pgid);
         *i += 2;    /* skip '$' and '$' */
+        return 1;
+    }
+
+    /*
+     * Step 5 — ${VAR} braced expansion.
+     *
+     * Syntax: '${' <name> '}'  where <name> is a letter or '_' followed
+     * by zero or more letters, digits, or underscores.
+     *
+     * The braces are consumed but not included in the variable name.
+     * If the closing '}' is missing, we fall through and treat '$' as a
+     * literal (defensive: avoids undefined behaviour on malformed input).
+     */
+    if (next == '{')
+    {
+        int j = *i + 2;     /* position of first char inside '{}' */
+
+        /* Variable name must start with a letter or underscore */
+        if (!((input[j] >= 'a' && input[j] <= 'z') ||
+              (input[j] >= 'A' && input[j] <= 'Z') ||
+               input[j] == '_'))
+        {
+            return 0;   /* not a valid name — treat '$' as literal */
+        }
+
+        /* Scan to end of name */
+        int name_start = j;
+        while (is_var_char(input[j]))
+            j++;
+
+        /* Expect closing '}' */
+        if (input[j] != '}')
+            return 0;   /* malformed ${... — treat '$' as literal */
+
+        /* Extract name into a local buffer */
+        int   name_len = j - name_start;
+        char  name_buf[64];     /* env var names > 63 chars are pathological */
+        if (name_len >= (int)sizeof(name_buf))
+            name_len = (int)sizeof(name_buf) - 1;
+        for (int k = 0; k < name_len; k++)
+            name_buf[k] = input[name_start + k];
+        name_buf[name_len] = '\0';
+
+        /* Look up and copy the value (empty string if unset) */
+        const char *val = env_get(name_buf);
+        if (val != 0)
+        {
+            for (int k = 0; val[k] != '\0'; k++)
+                add_char_to_word(tok, val[k], word_len);
+        }
+        /* else: unset variable — expand to empty (POSIX XBD 2.6.2) */
+
+        *i = j + 1;     /* skip past '$', '{', name, '}' */
+        return 1;
+    }
+
+    /*
+     * Step 5 — $VAR unbraced expansion.
+     *
+     * The character after '$' must be a letter or '_' to be a valid
+     * variable name start (POSIX XBD 2.10.2).  Digits after '$' that
+     * are not '?' are positional parameters ($1..$9) — not yet
+     * implemented; they are treated as literal '$' for now.
+     */
+    if ((next >= 'a' && next <= 'z') ||
+        (next >= 'A' && next <= 'Z') ||
+         next == '_')
+    {
+        /* Scan the full variable name */
+        int j = *i + 1;     /* position of first name char (= next) */
+        while (is_var_char(input[j]))
+            j++;
+        /* input[j] is now the first character AFTER the name */
+
+        /* Extract name into a local buffer */
+        int  name_len   = j - (*i + 1);
+        char name_buf[64];
+        if (name_len >= (int)sizeof(name_buf))
+            name_len = (int)sizeof(name_buf) - 1;
+        for (int k = 0; k < name_len; k++)
+            name_buf[k] = input[*i + 1 + k];
+        name_buf[name_len] = '\0';
+
+        /* Look up and copy the value (empty string if unset) */
+        const char *val = env_get(name_buf);
+        if (val != 0)
+        {
+            for (int k = 0; val[k] != '\0'; k++)
+                add_char_to_word(tok, val[k], word_len);
+        }
+        /* else: unset variable — expand to empty (POSIX XBD 2.6.2) */
+
+        *i = j;     /* skip past '$' + name */
         return 1;
     }
 
