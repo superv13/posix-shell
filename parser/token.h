@@ -1,4 +1,9 @@
 // parser/token.h
+//
+// Step 4 — && and || operators:
+//   TOKEN_AND  : the '&&' token — run next pipeline only if previous exited 0
+//   TOKEN_OR   : the '||' token — run next pipeline only if previous exited non-zero
+//
 #ifndef TOKEN_H
 #define TOKEN_H
 
@@ -7,14 +12,16 @@
 /* Token types produced by the tokenizer */
 typedef enum {
     TOKEN_WORD,           /* Command name, argument, or filename */
-    TOKEN_PIPE,           /* | */
-    TOKEN_REDIR_OUT,      /* > */
-    TOKEN_REDIR_APPEND,   /* >> */
-    TOKEN_REDIR_IN,       /* < */
-    TOKEN_BACKGROUND,     /* & */
-    TOKEN_SEMICOLON,      /* ; */
-    TOKEN_NEWLINE,        /* \n */
-    TOKEN_EOF             /* End of input */
+    TOKEN_PIPE,           /* |                                   */
+    TOKEN_REDIR_OUT,      /* >                                   */
+    TOKEN_REDIR_APPEND,   /* >>                                  */
+    TOKEN_REDIR_IN,       /* <                                   */
+    TOKEN_BACKGROUND,     /* &  (single ampersand — background)  */
+    TOKEN_AND,            /* && (AND list — run if prev exited 0)*/
+    TOKEN_OR,             /* || (OR  list — run if prev failed)  */
+    TOKEN_SEMICOLON,      /* ;                                   */
+    TOKEN_NEWLINE,        /* \n                                  */
+    TOKEN_EOF             /* End of input                        */
 } TokenType;
 
 /* Represents a single scanned unit */

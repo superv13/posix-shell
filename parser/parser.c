@@ -1,4 +1,10 @@
 // parser/parser.c
+//
+// Step 4 — && and || support:
+//   TOKEN_AND and TOKEN_OR now act as pipeline terminators: when the parser
+//   sees either token, it saves the current pipeline and returns immediately.
+//   It does NOT consume the token — the caller (execute_line in shell_loop.c)
+//   inspects which operator follows and decides whether to run the next pipeline.
 #include "parser.h"
 #include "../utils/string.h"
 
@@ -137,6 +143,40 @@ int parse(Token *tokens, int token_count, Pipeline *pipeline)
              */
             pipeline->background = 1;
             i++;
+
+        } else if (t.type == TOKEN_AND
+                || t.type == TOKEN_OR) {
+            /*
+             * Step 4 — AND/OR list separator.
+             *
+             * '&&' and '||' end the current pipeline, just like ';'.
+             * We do NOT advance `i` (no i++ here) so that the token
+             * remains at position `i` when parse() returns.
+             *
+             * The caller (execute_line in shell_loop.c) checks
+             * tokens[*consumed_out] to find which operator links
+             * the next pipeline and applies the short-circuit rule.
+             *
+             * A leading '&&' or '||' with no preceding command is a
+             * syntax error (current_cmd is empty and pipeline.count == 0).
+             */
+            if (current_cmd.argc == 0
+                && current_cmd.input_file[0]  == '\0'
+                && current_cmd.output_file[0] == '\0'
+                && pipeline->count == 0)
+            {
+                return -1; /* syntax error: && or || with no left-hand pipeline */
+            }
+            if (current_cmd.argc > 0
+                || current_cmd.input_file[0]  != '\0'
+                || current_cmd.output_file[0] != '\0')
+            {
+                if (pipeline->count < MAX_PIPELINE_DEPTH) {
+                    pipeline->commands[pipeline->count] = current_cmd;
+                    pipeline->count++;
+                }
+            }
+            break; /* return without consuming the && or || token */
 
         } else if (t.type == TOKEN_SEMICOLON
                 || t.type == TOKEN_NEWLINE

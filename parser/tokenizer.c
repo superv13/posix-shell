@@ -19,6 +19,13 @@
 //     ~/path   at word start followed by '/'                        → $HOME/path
 //   '~' anywhere else (mid-word, inside quotes) is left as a literal.
 //   If $HOME is unset, '~' is left unexpanded (POSIX XBD 2.6.1, line 3).
+//
+// Step 4 — && and || operators:
+//   '&' followed immediately by another '&' emits TOKEN_AND  (&&).
+//   '|' followed immediately by another '|' emits TOKEN_OR   (||).
+//   A single '&' still emits TOKEN_BACKGROUND.
+//   A single '|' still emits TOKEN_PIPE.
+//   Both are recognised only in STATE_NORMAL (between words), matching POSIX.
 
 #include "tokenizer.h"
 #include "../utils/string.h"
@@ -295,8 +302,22 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
             if (is_whitespace(c)) {
                 i++;
             } else if (c == '|') {
-                emit_token(tokens, token_count, TOKEN_PIPE, NULL, NULL);
-                i++;
+                /*
+                 * Step 4 — '|' vs '||'.
+                 *
+                 * Peek at the next character:
+                 *   '||' → TOKEN_OR  (advance 2)
+                 *    '|' → TOKEN_PIPE (advance 1)
+                 *
+                 * Must come before the general word-start path.
+                 */
+                if (input[i + 1] == '|') {
+                    emit_token(tokens, token_count, TOKEN_OR, NULL, NULL);
+                    i += 2;
+                } else {
+                    emit_token(tokens, token_count, TOKEN_PIPE, NULL, NULL);
+                    i++;
+                }
             } else if (c == '>') {
                 if (input[i+1] == '>') {
                     emit_token(tokens, token_count, TOKEN_REDIR_APPEND, NULL, NULL);
@@ -309,8 +330,20 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                 emit_token(tokens, token_count, TOKEN_REDIR_IN, NULL, NULL);
                 i++;
             } else if (c == '&') {
-                emit_token(tokens, token_count, TOKEN_BACKGROUND, NULL, NULL);
-                i++;
+                /*
+                 * Step 4 — '&' vs '&&'.
+                 *
+                 * Peek at the next character:
+                 *   '&&' → TOKEN_AND        (advance 2)
+                 *    '&' → TOKEN_BACKGROUND  (advance 1)
+                 */
+                if (input[i + 1] == '&') {
+                    emit_token(tokens, token_count, TOKEN_AND, NULL, NULL);
+                    i += 2;
+                } else {
+                    emit_token(tokens, token_count, TOKEN_BACKGROUND, NULL, NULL);
+                    i++;
+                }
             } else if (c == ';') {
                 emit_token(tokens, token_count, TOKEN_SEMICOLON, NULL, NULL);
                 i++;
