@@ -28,6 +28,49 @@
 #include "../trace/trace.h"
 #include "../env/env.h"
 
+static const char *g_script_file = (const char *)0;
+static int         g_script_line = 0;
+
+/*
+ * int_to_str
+ *
+ * Converts an integer value to a null-terminated string representation in buf.
+ * Returns the number of characters written.
+ */
+static int int_to_str(int value, char *buf)
+{
+    char digits[16];
+    int n = 0;
+    int len = 0;
+
+    if (value < 0)
+    {
+        buf[len++] = '-';
+        value = -value;
+    }
+
+    if (value == 0)
+    {
+        buf[len++] = '0';
+        buf[len] = '\0';
+        return len;
+    }
+
+    while (value > 0 && n < (int)sizeof(digits))
+    {
+        digits[n++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+
+    while (n > 0)
+    {
+        buf[len++] = digits[--n];
+    }
+
+    buf[len] = '\0';
+    return len;
+}
+
 /*
  * run_one_pipeline
  *
@@ -58,6 +101,7 @@ static void run_one_pipeline(Pipeline *pipeline)
 
     execute_pipeline(pipeline);
 }
+
 
 /*
  * SepType — kind of separator that ended a raw input segment
@@ -152,6 +196,17 @@ done:
     return len;
 }
 
+static int is_whitespace_str(const char *s)
+{
+    while (*s)
+    {
+        if (*s != ' ' && *s != '\t' && *s != '\r' && *s != '\n')
+            return 0;
+        s++;
+    }
+    return 1;
+}
+
 /*
  * execute_line  (Steps 4 + 5 — AND/OR list with per-segment expansion)
  *
@@ -184,7 +239,60 @@ static int execute_line(char *buf)
         int     seg_len = find_segment(buf, &pos, seg, MAX_INPUT, &sep);
 
         /* End of input with no segment */
-        if (seg_len == 0 && sep == SEP_NONE) break;
+        if (seg_len == 0 && sep == SEP_NONE)
+        {
+            if (!first && (join == SEP_AND || join == SEP_OR))
+            {
+                /* Fall through to report trailing && / || syntax error */
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        /* Check for list syntax errors: empty segments next to operators */
+        int is_empty = is_whitespace_str(seg);
+        if (is_empty)
+        {
+            int syntax_err = 0;
+            if (first && sep != SEP_NONE)
+            {
+                syntax_err = 1; /* e.g. "&& echo A" or "; echo A" */
+            }
+            else if (!first && (join == SEP_AND || join == SEP_OR))
+            {
+                syntax_err = 1; /* e.g. "echo A &&" or "echo A && && echo B" */
+            }
+            else if (!first && join == SEP_SEMICOLON && sep != SEP_NONE)
+            {
+                syntax_err = 1; /* e.g. "echo A ; ; echo B" */
+            }
+
+            if (syntax_err)
+            {
+                if (g_script_file)
+                {
+                    char err_prefix[] = "posixsh: ";
+                    char err_middle[] = ": line ";
+                    char err_suffix[] = ": syntax error\n";
+                    sys_write(2, err_prefix, my_strlen(err_prefix));
+                    sys_write(2, g_script_file, my_strlen(g_script_file));
+                    sys_write(2, err_middle, my_strlen(err_middle));
+                    char num_buf[16];
+                    int num_len = int_to_str(g_script_line, num_buf);
+                    sys_write(2, num_buf, num_len);
+                    sys_write(2, err_suffix, my_strlen(err_suffix));
+                }
+                else
+                {
+                    char err[] = "posixsh: syntax error\n";
+                    sys_write(2, err, my_strlen(err));
+                }
+                g_last_status = 2;
+                return -1;
+            }
+        }
 
         /* ── Short-circuit ───────────────────────────────────────────── */
         int skip = 0;
@@ -195,7 +303,7 @@ static int execute_line(char *buf)
         }
         first = 0;
 
-        if (!skip && seg_len > 0)
+        if (!skip && seg_len > 0 && !is_empty)
         {
             /*
              * Tokenise this segment fresh.
@@ -210,8 +318,24 @@ static int execute_line(char *buf)
             Pipeline pipeline;
             if (parse(tokens, token_count, &pipeline) == -1)
             {
-                char err[] = "posixsh: syntax error\n";
-                sys_write(2, err, my_strlen(err));
+                if (g_script_file)
+                {
+                    char err_prefix[] = "posixsh: ";
+                    char err_middle[] = ": line ";
+                    char err_suffix[] = ": syntax error\n";
+                    sys_write(2, err_prefix, my_strlen(err_prefix));
+                    sys_write(2, g_script_file, my_strlen(g_script_file));
+                    sys_write(2, err_middle, my_strlen(err_middle));
+                    char num_buf[16];
+                    int num_len = int_to_str(g_script_line, num_buf);
+                    sys_write(2, num_buf, num_len);
+                    sys_write(2, err_suffix, my_strlen(err_suffix));
+                }
+                else
+                {
+                    char err[] = "posixsh: syntax error\n";
+                    sys_write(2, err, my_strlen(err));
+                }
                 g_last_status = 2;
                 return -1;
             }
@@ -366,7 +490,12 @@ void shell_main(int argc, char **argv, char **envp)
             line_buf[len] = '\0';
 
             if (len > 0)
-                execute_line(line_buf);
+            {
+                if (execute_line(line_buf) == -1)
+                {
+                    sys_exit(2);
+                }
+            }
         }
 
         sys_exit(g_last_status);
@@ -445,11 +574,14 @@ void shell_main(int argc, char **argv, char **envp)
          * the tokenizer's Step 1 comment-handling discards them automatically
          * — no special check is needed here.
          */
+        g_script_file = script_file;
+        g_script_line = 0;
         char line_buf[MAX_INPUT];
         const char *src = script_buf;
 
         while (*src)
         {
+            g_script_line++;
             int len = 0;
             while (*src && *src != '\n' && len < (int)(sizeof(line_buf) - 1))
                 line_buf[len++] = *src++;
@@ -457,7 +589,12 @@ void shell_main(int argc, char **argv, char **envp)
             line_buf[len] = '\0';
 
             if (len > 0)
-                execute_line(line_buf);
+            {
+                if (execute_line(line_buf) == -1)
+                {
+                    sys_exit(2);
+                }
+            }
         }
 
         sys_exit(g_last_status);

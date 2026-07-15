@@ -192,7 +192,48 @@ static void run_stage(
     {
         write_str(2, "posixsh: ");
         write_str(2, cmd->argv[0]);
-        write_str(2, ": command not found\n");
+        write_str(2, ": command not found");
+
+        const char *path_env = env_get("PATH");
+        if (path_env == 0)
+        {
+            path_env = "/bin:/usr/bin:/usr/local/bin";
+        }
+
+        write_str(2, " (searched ");
+
+        const char *p = path_env;
+        int first_dir = 1;
+        while (*p != '\0')
+        {
+            char dir[MAX_PATH_LEN];
+            int  dir_len = 0;
+
+            while (*p != '\0' && *p != ':' && dir_len < MAX_PATH_LEN - 1)
+            {
+                dir[dir_len++] = *p++;
+            }
+            dir[dir_len] = '\0';
+
+            if (*p == ':')
+            {
+                p++;    /* skip the colon separator */
+            }
+
+            if (dir_len == 0)
+            {
+                continue;
+            }
+
+            if (!first_dir)
+            {
+                write_str(2, ", ");
+            }
+            first_dir = 0;
+
+            write_str(2, dir);
+        }
+        write_str(2, ")\n");
         sys_exit(127);
     }
 
