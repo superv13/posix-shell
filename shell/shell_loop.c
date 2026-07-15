@@ -133,6 +133,27 @@ void shell_main(int argc, char **argv, char **envp)
      */
     char *c_script = (char *)0;  /* non-NULL if -c was given */
 
+    /*
+     * Login shell detection.
+     *
+     * When the system invokes a login shell it sets argv[0] to a dash-prefixed
+     * version of the binary name, e.g. "-posixsh" instead of "posixsh".
+     * POSIX requires the shell to recognise this and behave as a login shell.
+     *
+     * For now: detect it and ignore it safely (do not crash).
+     * A full login shell would read /etc/profile and ~/.profile here.
+     * We skip those because we do not implement variable expansion for
+     * filenames yet — and sourcing is a Phase 6 feature.
+     *
+     * The critical requirement is: do not crash. argv[0][0] == '-' is enough
+     * to detect this case.
+     */
+    int is_login_shell = 0;
+    if (argc > 0 && argv[0] != (char *)0 && argv[0][0] == '-')
+        is_login_shell = 1;
+
+    (void)is_login_shell;   /* suppress unused-variable warning for now */
+
     for (int i = 1; i < argc; i++)
     {
         if (my_strcmp(argv[i], "--trace") == 0)

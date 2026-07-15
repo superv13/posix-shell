@@ -38,4 +38,13 @@ all:
 clean:
 	rm -f posixsh
 
-.PHONY: all clean
+.PHONY: all clean release
+
+# build release version
+# Why it actually needed ?
+# "all" includes -g, which adds debug symbols.
+# "release" excludes -g, resulting in a smaller binary.
+
+release:
+	$(CC) -nostdlib -static -ffreestanding -Wall $(SRC) -o posixsh_release
+	strip posixsh_release
