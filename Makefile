@@ -35,7 +35,7 @@ SRC = \
 # Build both debug (with -g) and stripped release binaries in one step.
 # perf_measure.sh and strace_compare.sh default to posixsh_release so
 # benchmarks always measure the optimised binary, not the debug build.
-all: posixsh posixsh_release
+all: posixsh posixsh_release nolibc_exit
 
 posixsh: $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o posixsh
@@ -44,8 +44,14 @@ posixsh_release: $(SRC)
 	$(CC) -nostdlib -static -ffreestanding -Wall $(SRC) -o posixsh_release
 	strip posixsh_release
 
+# ── Rung 5: absolute syscall floor ──────────────────────────────────────────
+# nolibc_exit has _start in inline asm that calls exit_group directly.
+# -nostdlib : no crt0/libc  -static : no ld.so  -O0 : no asm reordering
+nolibc_exit: nolibc_exit.c
+	$(CC) -nostdlib -static -O0 -o nolibc_exit nolibc_exit.c
+
 clean:
-	rm -f posixsh posixsh_release
+	rm -f posixsh posixsh_release nolibc_exit
 
 .PHONY: all clean release
 
