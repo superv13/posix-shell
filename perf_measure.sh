@@ -20,15 +20,16 @@
 
 set -euo pipefail
 
-SHELL_BIN="${POSIXSH:-$(dirname "$0")/posixsh}"
+SHELL_BIN="${POSIXSH:-$(dirname "$0")/posixsh_release}"
 REPS=5
 CSV=0
 
-for arg in "$@"; do
-    case "$arg" in
-        --reps)  shift; REPS="$1";;
+while (( $# > 0 )); do
+    case "$1" in
+        --reps)  shift; REPS="${1:?'--reps requires a number'}";;
         --csv)   CSV=1;;
     esac
+    shift
 done
 
 [[ -x "$SHELL_BIN" ]] || { echo "error: posixsh not found at $SHELL_BIN — run make first"; exit 1; }

@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SHELL_BIN="${POSIXSH:-$SCRIPT_DIR/posixsh}"
+SHELL_BIN="${POSIXSH:-$SCRIPT_DIR/posixsh_release}"
 BRIEF=0
 CSV=0
 

@@ -32,19 +32,22 @@ SRC = \
     jobs/jobs.c             \
     trace/trace.c
 
-all:
+# Build both debug (with -g) and stripped release binaries in one step.
+# perf_measure.sh and strace_compare.sh default to posixsh_release so
+# benchmarks always measure the optimised binary, not the debug build.
+all: posixsh posixsh_release
+
+posixsh: $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o posixsh
 
+posixsh_release: $(SRC)
+	$(CC) -nostdlib -static -ffreestanding -Wall $(SRC) -o posixsh_release
+	strip posixsh_release
+
 clean:
-	rm -f posixsh
+	rm -f posixsh posixsh_release
 
 .PHONY: all clean release
 
-# build release version
-# Why it actually needed ?
-# "all" includes -g, which adds debug symbols.
-# "release" excludes -g, resulting in a smaller binary.
-
-release:
-	$(CC) -nostdlib -static -ffreestanding -Wall $(SRC) -o posixsh_release
-	strip posixsh_release
+# Explicit alias kept for backwards compatibility: "make release" still works.
+release: posixsh_release

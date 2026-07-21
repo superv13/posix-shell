@@ -35,7 +35,7 @@ int execute_builtin(Command *cmd)
 
     if (my_strcmp(name, "exit") == 0)
     {
-        builtin_exit();
+        builtin_exit(cmd);
         return 1;
     }
 
