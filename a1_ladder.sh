@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
 # a1_ladder.sh — A1 Static-Linking Ladder: Full Measurement
 #
-# Builds and measures the 5-rung syscall decomposition:
+# Builds and measures the 6-rung syscall decomposition:
 #
-#   Rung 1a  bash   (dynamic, glibc)          — baseline full cost
-#   Rung 1b  dash   (dynamic, glibc)          — minimal dynamic shell peer
-#   Rung 2   BusyBox ash (static, glibc)      — removes dynamic linker cost
-#   Rung 3   BusyBox ash (static, musl)       — removes glibc init cost
-#   Rung 4   posixsh (static, zero-libc)      — removes all libc; pure shell
-#   Rung 5   nolibc_exit (static, zero-libc)  — absolute kernel floor
+#   Rung 1a  bash          (dynamic, glibc)     — baseline full cost
+#   Rung 1b  dash          (dynamic, glibc)     — minimal dynamic shell peer
+#   Rung 1c  busybox-ash   (dynamic, glibc)     — same-binary dynamic reference
+#   Rung 2   BusyBox ash   (static,  glibc)     — same binary, removes linker
+#   Rung 3   BusyBox ash   (static,  musl)      — removes glibc init cost
+#   Rung 4   posixsh       (static,  zero-libc) — removes all libc; pure shell
+#   Rung 5   nolibc_exit   (static,  zero-libc) — absolute kernel floor
 #
 # Each gap shows exactly which syscall category was eliminated:
-#   1→2: dynamic linker (openat/mmap for .so files)
-#   2→3: glibc init overhead (brk, getrandom, set_tid_address, getuid/gid…)
-#   3→4: remaining libc init (whatever musl still does)
-#   4→5: posixsh's own shell work (getpid, rt_sigaction×5, setpgid)
+#   1b→1c: binary difference (dash vs busybox, both dynamic glibc)
+#   1c→2:  dynamic linker cost (same binary: busybox dynamic vs static)
+#   2→3:   glibc init overhead (brk, getrandom, set_tid_address, getuid/gid…)
+#   3→4:   remaining libc init (whatever musl still does)
+#   4→5:   posixsh's own shell work (getpid, rt_sigaction×6, SIGCHLD handler)
 #
 # Usage:
-#   bash a1_ladder.sh                  # full table + per-rung breakdown
-#   bash a1_ladder.sh --collect        # collect data only (save to files)
-#   bash a1_ladder.sh --csv            # machine-readable CSV output
-#   bash a1_ladder.sh --setup-musl     # set up musl BusyBox via Docker
-#   bash a1_ladder.sh --help           # this help
+#   bash a1_ladder.sh                    # full table + per-rung breakdown
+#   bash a1_ladder.sh --collect          # collect data only (save to files)
+#   bash a1_ladder.sh --csv              # machine-readable CSV output
+#   bash a1_ladder.sh --setup-musl       # set up musl BusyBox via Docker
+#   bash a1_ladder.sh --setup-musl-wget  # set up musl BusyBox via wget (no Docker)
+#   bash a1_ladder.sh --help             # this help
 #
 # Prerequisites:
 #   strace, bash, dash, busybox-static (apt install busybox-static)
-#   For Rung 3 (musl): run --setup-musl first, or set BUSYBOX_MUSL env var.
+#   For Rung 1c (dynamic busybox): cp $(which busybox) bin/busybox-dynamic
+#   For Rung 3 (musl): run --setup-musl or --setup-musl-wget, or set BUSYBOX_MUSL.
 #   For Rung 4+5: run 'make' in the project root first.
 #
 # Environment overrides:
-#   POSIXSH        path to posixsh_release binary
-#   BUSYBOX_GLIBC  path to static-glibc busybox (default: /usr/bin/busybox)
-#   BUSYBOX_MUSL   path to static-musl busybox (default: /tmp/busybox_musl)
+#   POSIXSH          path to posixsh_release binary
+#   BUSYBOX_GLIBC    path to static-glibc busybox  (default: /usr/bin/busybox)
+#   BUSYBOX_MUSL     path to static-musl busybox   (default: bin/busybox-musl-static)
+#   BUSYBOX_DYNAMIC  path to dynamic busybox        (default: bin/busybox-dynamic)
 # ===========================================================================
 
 set -uo pipefail
@@ -43,7 +48,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---------------------------------------------------------------------------
 POSIXSH="${POSIXSH:-$SCRIPT_DIR/posixsh_release}"
 BUSYBOX_GLIBC="${BUSYBOX_GLIBC:-/usr/bin/busybox}"
-BUSYBOX_MUSL="${BUSYBOX_MUSL:-/tmp/busybox_musl_static}"
+BUSYBOX_MUSL="${BUSYBOX_MUSL:-$SCRIPT_DIR/bin/busybox-musl-static}"
+BUSYBOX_DYNAMIC="${BUSYBOX_DYNAMIC:-$SCRIPT_DIR/bin/busybox-dynamic}"
 NOLIBC_EXIT="${NOLIBC_EXIT:-$SCRIPT_DIR/nolibc_exit}"
 DATA_DIR="${SCRIPT_DIR}/a1_data"
 
@@ -51,10 +57,11 @@ DATA_DIR="${SCRIPT_DIR}/a1_data"
 MODE="table"
 for arg in "$@"; do
     case "$arg" in
-        --csv)        MODE="csv" ;;
-        --collect)    MODE="collect" ;;
-        --setup-musl) MODE="setup-musl" ;;
-        --help|-h)    MODE="help" ;;
+        --csv)             MODE="csv" ;;
+        --collect)         MODE="collect" ;;
+        --setup-musl)      MODE="setup-musl" ;;
+        --setup-musl-wget) MODE="setup-musl-wget" ;;
+        --help|-h)         MODE="help" ;;
     esac
 done
 
@@ -71,20 +78,41 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "setup-musl" ]]; then
     echo "=== Setting up musl-static BusyBox from Alpine Linux ==="
-    command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found"; exit 1; }
+    command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found. Use --setup-musl-wget instead."; exit 1; }
     # Alpine's 'busybox-static' package installs /bin/busybox.static —
     # a true static-pie musl binary, NOT the dynamic /bin/busybox.
     echo "  Pulling Alpine image, installing busybox-static, extracting /bin/busybox.static ..."
+    mkdir -p "$SCRIPT_DIR/bin"
     docker run --rm alpine:latest \
         sh -c "apk add busybox-static -q 2>/dev/null && cat /bin/busybox.static" \
-        > /tmp/busybox_musl_static
-    chmod +x /tmp/busybox_musl_static
+        > "$SCRIPT_DIR/bin/busybox-musl-static"
+    chmod +x "$SCRIPT_DIR/bin/busybox-musl-static"
     echo "  Verifying ..."
-    file /tmp/busybox_musl_static
-    strings /tmp/busybox_musl_static | grep -iE "musl|MUSL" | head -3
+    file "$SCRIPT_DIR/bin/busybox-musl-static"
+    strings "$SCRIPT_DIR/bin/busybox-musl-static" | grep -iE "musl|MUSL" | head -3
     echo ""
-    echo "  Rung 3 binary ready at: /tmp/busybox_musl_static"
-    echo "  Test: strace -c /tmp/busybox_musl_static ash -c 'exit'"
+    echo "  Rung 3 binary ready at: $SCRIPT_DIR/bin/busybox-musl-static"
+    echo "  Test: strace -c $SCRIPT_DIR/bin/busybox-musl-static ash -c 'exit'"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Setup musl BusyBox via wget (Docker-free fallback)
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "setup-musl-wget" ]]; then
+    echo "=== Setting up musl-static BusyBox via wget (Docker-free) ==="
+    command -v wget >/dev/null 2>&1 || { echo "ERROR: wget not found (apt install wget)"; exit 1; }
+    mkdir -p "$SCRIPT_DIR/bin"
+    echo "  Downloading BusyBox 1.35.0 x86_64-linux-musl static binary ..."
+    wget -q https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox \
+        -O "$SCRIPT_DIR/bin/busybox-musl-static"
+    chmod +x "$SCRIPT_DIR/bin/busybox-musl-static"
+    echo "  Verifying ..."
+    file "$SCRIPT_DIR/bin/busybox-musl-static"
+    strings "$SCRIPT_DIR/bin/busybox-musl-static" | grep -iE "musl|MUSL" | head -3
+    echo ""
+    echo "  Rung 3 binary ready at: $SCRIPT_DIR/bin/busybox-musl-static"
+    echo "  Test: strace -c $SCRIPT_DIR/bin/busybox-musl-static ash -c 'exit'"
     exit 0
 fi
 
@@ -113,8 +141,16 @@ check_prereqs() {
     }
     if [[ ! -x "$BUSYBOX_MUSL" ]]; then
         echo "WARNING: musl-static busybox not found at $BUSYBOX_MUSL"
-        echo "         Rung 3 will be skipped. Run: bash $0 --setup-musl"
+        echo "         Rung 3 will be skipped."
+        echo "         Fix (Docker):      bash $0 --setup-musl"
+        echo "         Fix (Docker-free): bash $0 --setup-musl-wget"
         BUSYBOX_MUSL=""
+    fi
+    if [[ ! -x "$BUSYBOX_DYNAMIC" ]]; then
+        echo "WARNING: dynamic busybox not found at $BUSYBOX_DYNAMIC"
+        echo "         Rung 1c will be skipped."
+        echo "         Fix: mkdir -p bin && cp \$(which busybox) bin/busybox-dynamic"
+        BUSYBOX_DYNAMIC=""
     fi
     [[ "$ok" -eq 1 ]]
 }
@@ -261,44 +297,62 @@ echo "=== Measuring all rungs (3 runs each for determinism check) ===" >&3
 echo "" >&3
 
 # Rung 1a — bash, dynamic glibc
-printf "  Rung 1a  bash (dynamic, glibc)        ... " >&3
+printf "  Rung 1a  bash (dynamic, glibc)         ... " >&3
 R1A=$(run_rung "rung1a_bash"    bash  -c "exit")
-echo "$R1A syscalls" >&3
+VT1A=$(verify_binary_type "$(command -v bash)")
+echo "$R1A syscalls  [${VT1A}]" >&3
 
 # Rung 1b — dash, dynamic glibc
-printf "  Rung 1b  dash (dynamic, glibc)        ... " >&3
+printf "  Rung 1b  dash (dynamic, glibc)         ... " >&3
 R1B=$(run_rung "rung1b_dash"    dash  -c "exit")
-echo "$R1B syscalls" >&3
+VT1B=$(verify_binary_type "$(command -v dash)")
+echo "$R1B syscalls  [${VT1B}]" >&3
+
+# Rung 1c — BusyBox ash, dynamic glibc (same-binary pair with Rung 2)
+R1C="N/A"
+if [[ -n "$BUSYBOX_DYNAMIC" ]]; then
+    printf "  Rung 1c  busybox-ash (dynamic, glibc)  ... " >&3
+    R1C=$(run_rung "rung1c_busybox_dynamic"  "$BUSYBOX_DYNAMIC"  ash -c "exit")
+    VT1C=$(verify_binary_type "$BUSYBOX_DYNAMIC")
+    echo "$R1C syscalls  [${VT1C}]" >&3
+else
+    echo "  Rung 1c  busybox-ash (dynamic, glibc)  ... SKIPPED" >&3
+    echo "           (fix: mkdir -p bin && cp \$(which busybox) bin/busybox-dynamic)" >&3
+fi
 
 # Rung 2 — BusyBox ash, static glibc
 if [[ -n "$BUSYBOX_GLIBC" ]]; then
-    printf "  Rung 2   busybox-ash (static, glibc)  ... " >&3
+    printf "  Rung 2   busybox-ash (static, glibc)   ... " >&3
     R2=$(run_rung "rung2_busybox_glibc"  "$BUSYBOX_GLIBC"  ash -c "exit")
-    echo "$R2 syscalls" >&3
+    VT2=$(verify_binary_type "$BUSYBOX_GLIBC")
+    echo "$R2 syscalls  [${VT2}]" >&3
 else
     R2="N/A"
-    echo "  Rung 2   busybox-ash (static, glibc)  ... SKIPPED (not installed)" >&3
+    echo "  Rung 2   busybox-ash (static, glibc)   ... SKIPPED (not installed)" >&3
 fi
 
 # Rung 3 — BusyBox ash, static musl
 if [[ -n "$BUSYBOX_MUSL" ]]; then
-    printf "  Rung 3   busybox-ash (static, musl)   ... " >&3
+    printf "  Rung 3   busybox-ash (static, musl)    ... " >&3
     R3=$(run_rung "rung3_busybox_musl"   "$BUSYBOX_MUSL"   ash -c "exit")
-    echo "$R3 syscalls" >&3
+    VT3=$(verify_binary_type "$BUSYBOX_MUSL")
+    echo "$R3 syscalls  [${VT3}]" >&3
 else
     R3="N/A"
-    echo "  Rung 3   busybox-ash (static, musl)   ... SKIPPED (run --setup-musl first)" >&3
+    echo "  Rung 3   busybox-ash (static, musl)    ... SKIPPED (run --setup-musl first)" >&3
 fi
 
 # Rung 4 — posixsh, static zero-libc
-printf "  Rung 4   posixsh (static, zero-libc)  ... " >&3
+printf "  Rung 4   posixsh (static, zero-libc)   ... " >&3
 R4=$(run_rung "rung4_posixsh"   "$POSIXSH"  -c "exit")
-echo "$R4 syscalls" >&3
+VT4=$(verify_binary_type "$POSIXSH")
+echo "$R4 syscalls  [${VT4}]" >&3
 
 # Rung 5 — nolibc_exit, absolute floor (no arguments)
-printf "  Rung 5   nolibc_exit (floor)          ... " >&3
+printf "  Rung 5   nolibc_exit (floor)           ... " >&3
 R5=$(run_rung "rung5_nolibc"   "$NOLIBC_EXIT")
-echo "$R5 syscalls" >&3
+VT5=$(verify_binary_type "$NOLIBC_EXIT")
+echo "$R5 syscalls  [${VT5}]" >&3
 
 echo "" >&3
 
@@ -309,6 +363,7 @@ if [[ "$MODE" == "csv" ]]; then
     echo "rung,label,linking,libc,syscall_count"
     echo "1a,bash,dynamic,glibc,$R1A"
     echo "1b,dash,dynamic,glibc,$R1B"
+    echo "1c,busybox-ash,dynamic,glibc,$R1C"
     echo "2,busybox-ash,static,glibc,$R2"
     echo "3,busybox-ash,static,musl,$R3"
     echo "4,posixsh,static,zero-libc,$R4"
@@ -330,16 +385,33 @@ echo ""
 top
 row "Rung" "Binary / config" "Syscalls" "vs prev"
 sep
-row "1a (baseline)" "bash  [dynamic, glibc]" "$R1A" "—"
-row "1b (baseline)" "dash  [dynamic, glibc]" "$R1B" "—"
+row "1a (baseline)" "bash  [dynamic, glibc]"          "$R1A" "—"
+row "1b (baseline)" "dash  [dynamic, glibc]"          "$R1B" "—"
+if [[ "$R1C" != "N/A" ]]; then
+    row "1c (same-bin)" "busybox-ash  [dynamic, glibc]" "$R1C" "—"
+else
+    row "1c (skipped)"  "busybox-ash  [dynamic, glibc]" "N/A"  "—"
+fi
 sep
 
-if [[ "$R2" != "N/A" && "$R1B" =~ ^[0-9]+$ && "$R2" =~ ^[0-9]+$ ]]; then
-    GAP12=$((R1B - R2))
-    if (( GAP12 >= 0 )); then
-        row "2" "busybox-ash  [static, glibc]" "$R2" "-${GAP12} (−linker)"
+# Rung 2: prefer 1c→2 gap (same binary, isolates linker); fall back to 1b→2
+if [[ "$R2" != "N/A" && "$R2" =~ ^[0-9]+$ ]]; then
+    if [[ "$R1C" != "N/A" && "$R1C" =~ ^[0-9]+$ ]]; then
+        GAP_LINKER=$((R1C - R2))
+        if (( GAP_LINKER >= 0 )); then
+            row "2" "busybox-ash  [static, glibc]" "$R2" "-${GAP_LINKER} (−linker)"
+        else
+            row "2" "busybox-ash  [static, glibc]" "$R2" "+$((-GAP_LINKER)) more"
+        fi
+    elif [[ "$R1B" =~ ^[0-9]+$ ]]; then
+        GAP12=$((R1B - R2))
+        if (( GAP12 >= 0 )); then
+            row "2" "busybox-ash  [static, glibc]" "$R2" "-${GAP12} (−linker†)"
+        else
+            row "2" "busybox-ash  [static, glibc]" "$R2" "+$((-GAP12)) more"
+        fi
     else
-        row "2" "busybox-ash  [static, glibc]" "$R2" "+$((-GAP12)) more"
+        row "2" "busybox-ash  [static, glibc]" "$R2" "N/A"
     fi
 else
     row "2" "busybox-ash  [static, glibc]" "$R2" "N/A"
@@ -386,10 +458,19 @@ top
 printf '│  %-22s  %-24s  %-18s  │\n' "Transition" "Syscalls removed" "Category"
 sep
 
-if [[ "$R2" =~ ^[0-9]+$ && "$R1B" =~ ^[0-9]+$ ]]; then
-    printf '│  %-22s  %-24s  %-18s  │\n' "1b→2 (dyn→static glibc)" "$((R1B-R2)) saved" "Dynamic linker"
+# 1b→1c: binary difference (dash vs busybox, same link type)
+if [[ "$R1C" != "N/A" && "$R1C" =~ ^[0-9]+$ && "$R1B" =~ ^[0-9]+$ ]]; then
+    printf '│  %-22s  %-24s  %-18s  │\n' "1b→1c (dash→bb-dyn)" "$((R1B-R1C)) diff" "Binary difference"
 else
-    printf '│  %-22s  %-24s  %-18s  │\n' "1b→2 (dyn→static glibc)" "N/A" "Dynamic linker"
+    printf '│  %-22s  %-24s  %-18s  │\n' "1b→1c (dash→bb-dyn)" "N/A" "Binary difference"
+fi
+# 1c→2: same binary, dynamic vs static — pure linker cost
+if [[ "$R1C" != "N/A" && "$R1C" =~ ^[0-9]+$ && "$R2" =~ ^[0-9]+$ ]]; then
+    printf '│  %-22s  %-24s  %-18s  │\n' "1c→2 (same-bin dyn→st)" "$((R1C-R2)) saved" "Dynamic linker"
+elif [[ "$R2" =~ ^[0-9]+$ && "$R1B" =~ ^[0-9]+$ ]]; then
+    printf '│  %-22s  %-24s  %-18s  │\n' "1b→2 (dyn→static glibc)" "$((R1B-R2)) saved" "Dynamic linker†"
+else
+    printf '│  %-22s  %-24s  %-18s  │\n' "1c→2 (same-bin dyn→st)" "N/A" "Dynamic linker"
 fi
 
 if [[ "$R2" =~ ^[0-9]+$ && "$R3" =~ ^[0-9]+$ ]]; then
@@ -436,9 +517,9 @@ fi
 echo "  Absolute floor (Linux kernel minimum): $R5 syscall(s)"
 if [[ "$R4" =~ ^[0-9]+$ && "$R5" =~ ^[0-9]+$ ]]; then
     echo "  posixsh overhead above floor: $((R4-R5)) syscalls (documented shell init work)"
-    echo "    getpid ×1     — record shell PID for job control"
-    echo "    rt_sigaction ×5 — SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU handlers"
-    echo "    setpgid ×1    — place shell in its own process group"
+    echo "    getpid       ×1 — record shell PID for job control (\$\$)"
+    echo "    rt_sigaction ×6 — SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU (SIG_IGN)"
+    echo "                      + SIGCHLD (custom background-job reaper handler)"
 fi
 echo ""
 

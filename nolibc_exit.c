@@ -10,27 +10,30 @@
  *
  * WHAT THIS PROVES
  * ----------------
- * strace -c ./nolibc_exit shows exactly 2 syscalls:
+ * strace -c ./nolibc_exit records exactly 1 completed syscall in summary mode:
  *
- *   execve     — the kernel itself makes this call to load the binary
- *   exit_group — our one explicit syscall
+ *   execve(2)  — the kernel process-invocation and ELF-loading call
  *
- * Those 2 are the IRREDUCIBLE minimum imposed by the Linux kernel on any
- * binary.  No program can do fewer.
+ * Methodological Note on exit_group(231):
+ *   Our code explicitly executes exit_group(0) via inline assembly.
+ *   However, because exit_group terminates the process without returning,
+ *   strace -c does not record a return event and therefore omits it from
+ *   the summary count.  The call is real; the summary pairing cannot tally
+ *   it.  This is a well-known strace -c accounting property, not a bug.
  *
  * SIGNIFICANCE IN THE A1 LADDER
  * --------------------------------
  * Rung 4 (posixsh) shows N syscalls.
- * Rung 5 (nolibc_exit) shows 2 syscalls.
+ * Rung 5 (nolibc_exit) shows 1 syscall.
  *
- * The gap  N - 2  is posixsh's OWN deliberate shell-initialisation work:
+ * The gap  N - 1  is posixsh's OWN deliberate shell-initialisation work:
  *
- *   getpid        — record shell PID for job control
- *   rt_sigaction  — install handlers for SIGINT, SIGQUIT, SIGTSTP,
- *                   SIGTTIN, SIGTTOU  (×5 calls)
- *   setpgid       — place shell in its own process group
+ *   getpid        — record shell PID for $$ variable and job control
+ *   rt_sigaction  — install signal dispositions  (×6 calls):
+ *                     SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU → SIG_IGN
+ *                     SIGCHLD → custom background-job reaper handler
  *
- * None of these is overhead; all are documented shell requirements.
+ * None of these is overhead; all are documented POSIX shell requirements.
  *
  * COMPILATION (matches Makefile rule)
  * ------------------------------------
