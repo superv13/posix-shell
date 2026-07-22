@@ -51,7 +51,7 @@ BUSYBOX_GLIBC="${BUSYBOX_GLIBC:-/usr/bin/busybox}"
 BUSYBOX_MUSL="${BUSYBOX_MUSL:-$SCRIPT_DIR/bin/busybox-musl-static}"
 BUSYBOX_DYNAMIC="${BUSYBOX_DYNAMIC:-$SCRIPT_DIR/bin/busybox-dynamic}"
 NOLIBC_EXIT="${NOLIBC_EXIT:-$SCRIPT_DIR/nolibc_exit}"
-DATA_DIR="${SCRIPT_DIR}/a1_data"
+DATA_DIR="${SCRIPT_DIR}/outputs"
 
 # Parse flags
 MODE="table"
@@ -503,7 +503,7 @@ bot
 
 echo ""
 echo "=== Data files saved to: $DATA_DIR/ ==="
-echo "  Per-syscall breakdowns: a1_data/rungN_*_full.txt"
+echo "  Per-syscall breakdowns: outputs/rungN_*_full.txt"
 echo ""
 echo "=== Key takeaways ==="
 if [[ "$R1B" =~ ^[0-9]+$ && "$R4" =~ ^[0-9]+$ ]]; then

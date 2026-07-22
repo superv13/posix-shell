@@ -1,0 +1,12 @@
+category,posixsh_passed,posixsh_total,dash_passed,dash_total,bash_passed,bash_total,posixsh_implemented
+"Pipelines",1,17,15,17,15,17,1
+"I/O Redirections",2,33,9,33,19,33,1
+"Quoting",12,24,19,24,22,24,1
+"Word expansion (`$VAR`)",1,6,4,6,5,6,1
+"Word splitting",1,49,9,49,10,49,1
+"Builtins (`cd`/`exit`/`pwd`/`echo`)",2,8,5,8,4,8,1
+"Background & job control",2,19,17,19,18,19,1
+"Compound cmds (`if`/`while`/`for`)",0,0,5,5,5,5,0
+"Command substitution `$()`",0,0,22,30,23,30,0
+"Here-documents (`<<`)",0,0,26,33,25,33,0
+"Arithmetic expansion `$((..))`",0,0,28,37,31,37,0

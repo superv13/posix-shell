@@ -1,3 +1,12 @@
 tests/osh_spec/spec/
+tests/osh_spec/__pycache__
 nolibc_exit
-a1_data/
+$@
+1
+bar
+bar.txt
+foo bar
+foo.txt
+test_osh
+tmp.txt
+foo*
