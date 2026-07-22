@@ -28,6 +28,7 @@ SRC = \
     builtins/pwd.c          \
     builtins/exit.c         \
     builtins/jobs_builtin.c \
+    builtins/misc_builtins.c \
     signals/signals.c       \
     jobs/jobs.c             \
     trace/trace.c

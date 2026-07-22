@@ -2,6 +2,7 @@
 #define BUILTINS_H
 
 #include "../parser/parser.h"
+#include "misc_builtins.h"
 
 /*
 ===============================================================================

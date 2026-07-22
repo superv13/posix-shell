@@ -446,16 +446,67 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                     i++;
                 }
             } else if (c == '>') {
+                /*
+                 * '>' vs '>>' vs '>&M':
+                 *   '>>N' or '>>'  → TOKEN_REDIR_APPEND
+                 *   '>&-'          → TOKEN_REDIR_DUP_OUT (close)
+                 *   '>&M'          → TOKEN_REDIR_DUP_OUT  value="1>M"
+                 *   '>'            → TOKEN_REDIR_OUT
+                 * Also handles N>&M where previous WORD token was a digit.
+                 */
                 if (input[i+1] == '>') {
                     emit_token(tokens, token_count, TOKEN_REDIR_APPEND, NULL, NULL);
                     i += 2;
+                } else if (input[i+1] == '&') {
+                    /* '>&M' — fd-dup: stdout → M */
+                    int j = i + 2;
+                    char val[16];
+                    int vlen = 0;
+                    /* encode as "src>dst" in value; src defaults to 1 */
+                    val[vlen++] = '1'; val[vlen++] = '>';
+                    if (input[j] == '-') {
+                        val[vlen++] = '-'; j++;
+                    } else {
+                        while (input[j] >= '0' && input[j] <= '9' && vlen < 14)
+                            val[vlen++] = input[j++];
+                    }
+                    val[vlen] = '\0';
+                    if (*token_count < MAX_TOKENS) {
+                        tokens[*token_count].type = TOKEN_REDIR_DUP_OUT;
+                        for (int k = 0; k <= vlen; k++)
+                            tokens[*token_count].value[k] = val[k];
+                        (*token_count)++;
+                    }
+                    i = j;
                 } else {
                     emit_token(tokens, token_count, TOKEN_REDIR_OUT, NULL, NULL);
                     i++;
                 }
             } else if (c == '<') {
-                emit_token(tokens, token_count, TOKEN_REDIR_IN, NULL, NULL);
-                i++;
+                if (input[i+1] == '&') {
+                    /* '<&M' — fd-dup: stdin ← M */
+                    int j = i + 2;
+                    char val[16];
+                    int vlen = 0;
+                    val[vlen++] = '0'; val[vlen++] = '<';
+                    if (input[j] == '-') {
+                        val[vlen++] = '-'; j++;
+                    } else {
+                        while (input[j] >= '0' && input[j] <= '9' && vlen < 14)
+                            val[vlen++] = input[j++];
+                    }
+                    val[vlen] = '\0';
+                    if (*token_count < MAX_TOKENS) {
+                        tokens[*token_count].type = TOKEN_REDIR_DUP_IN;
+                        for (int k = 0; k <= vlen; k++)
+                            tokens[*token_count].value[k] = val[k];
+                        (*token_count)++;
+                    }
+                    i = j;
+                } else {
+                    emit_token(tokens, token_count, TOKEN_REDIR_IN, NULL, NULL);
+                    i++;
+                }
             } else if (c == '&') {
                 /*
                  * Step 4 — '&' vs '&&'.
@@ -521,20 +572,21 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                 }
             } else if (c == '#') {
                 /*
-                 * POSIX XBD 2.3 — Comment:
-                 *   A word beginning with '#' that is unquoted introduces
-                 *   a comment.  The comment runs to the end of the line.
-                 *   We emit TOKEN_EOF here so the parser sees a complete
-                 *   (possibly empty) command followed by end-of-input —
-                 *   identical to an empty line.
-                 *
-                 *   '#' mid-word (STATE_IN_WORD) does NOT reach this
-                 *   branch; it falls through to the else below and is
-                 *   added as a literal character.  That is correct POSIX
-                 *   behaviour: "echo he#llo" prints "he#llo".
+                 * POSIX XBD 2.3 — Comment.
                  */
                 emit_token(tokens, token_count, TOKEN_EOF, NULL, NULL);
                 break;
+            } else if (c == '!' && word_len == 0) {
+                /*
+                 * '!' in NORMAL state (i.e. not mid-word) is the POSIX
+                 * pipeline negation keyword.  Emit TOKEN_BANG so the parser
+                 * can set pipeline->negate = 1.
+                 *
+                 * '!' mid-word (e.g. "echo foo!bar") falls through to the
+                 * else branch and is treated as a literal character.
+                 */
+                emit_token(tokens, token_count, TOKEN_BANG, NULL, NULL);
+                i++;
             } else {
                 state = STATE_IN_WORD;
                 current_token.type = TOKEN_WORD;
@@ -542,7 +594,75 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                 i++;
             }
         } else if (state == STATE_IN_WORD) {
-            if (is_whitespace(c) || c == '|' || c == '>' || c == '<' || c == '&' || c == ';') {
+            /*
+             * N>&M / N<&M — fd-dup redirect where N is the word we are
+             * currently building (e.g. "1" in "echo hello 1>&2").
+             *
+             * Detect this BEFORE the generic "flush word on metachar" path:
+             * if the current partial word is all digits AND the next two
+             * characters are '>&' or '<&', consume the digit as the source
+             * fd and emit TOKEN_REDIR_DUP_OUT or TOKEN_REDIR_DUP_IN.
+             */
+            int is_all_digits = (word_len > 0);
+            for (int di = 0; di < word_len && is_all_digits; di++)
+                if (current_token.value[di] < '0' || current_token.value[di] > '9')
+                    is_all_digits = 0;
+
+            if (is_all_digits && c == '>' && input[i+1] == '&') {
+                /* Grab the source fd from the word buffer */
+                int src = 0;
+                for (int di = 0; di < word_len; di++)
+                    src = src * 10 + (current_token.value[di] - '0');
+                /* Reset word buffer — fd consumed as redirect, not argument */
+                current_token.value[0] = '\0';
+                word_len = 0;
+                state = STATE_NORMAL;
+                /* Build value string "src>dst" */
+                int j = i + 2;
+                char val[16];
+                int vlen = 0;
+                /* encode src */
+                char tmp[8]; int tn = 0;
+                int sv = src;
+                if (sv == 0) { tmp[tn++] = '0'; }
+                else { while (sv > 0) { tmp[tn++] = '0' + (sv % 10); sv /= 10; } }
+                for (int k = tn-1; k >= 0; k--) val[vlen++] = tmp[k];
+                val[vlen++] = '>';
+                if (input[j] == '-') { val[vlen++] = '-'; j++; }
+                else { while (input[j] >= '0' && input[j] <= '9' && vlen < 14) val[vlen++] = input[j++]; }
+                val[vlen] = '\0';
+                if (*token_count < MAX_TOKENS) {
+                    tokens[*token_count].type = TOKEN_REDIR_DUP_OUT;
+                    for (int k = 0; k <= vlen; k++) tokens[*token_count].value[k] = val[k];
+                    (*token_count)++;
+                }
+                i = j;
+            } else if (is_all_digits && c == '<' && input[i+1] == '&') {
+                int src = 0;
+                for (int di = 0; di < word_len; di++)
+                    src = src * 10 + (current_token.value[di] - '0');
+                current_token.value[0] = '\0';
+                word_len = 0;
+                state = STATE_NORMAL;
+                int j = i + 2;
+                char val[16];
+                int vlen = 0;
+                char tmp[8]; int tn = 0;
+                int sv = src;
+                if (sv == 0) { tmp[tn++] = '0'; }
+                else { while (sv > 0) { tmp[tn++] = '0' + (sv % 10); sv /= 10; } }
+                for (int k = tn-1; k >= 0; k--) val[vlen++] = tmp[k];
+                val[vlen++] = '<';
+                if (input[j] == '-') { val[vlen++] = '-'; j++; }
+                else { while (input[j] >= '0' && input[j] <= '9' && vlen < 14) val[vlen++] = input[j++]; }
+                val[vlen] = '\0';
+                if (*token_count < MAX_TOKENS) {
+                    tokens[*token_count].type = TOKEN_REDIR_DUP_IN;
+                    for (int k = 0; k <= vlen; k++) tokens[*token_count].value[k] = val[k];
+                    (*token_count)++;
+                }
+                i = j;
+            } else if (is_whitespace(c) || c == '|' || c == '>' || c == '<' || c == '&' || c == ';') {
                 emit_token(tokens, token_count, TOKEN_WORD, &current_token, &word_len);
                 state = STATE_NORMAL;
             } else if (c == '\'') {
@@ -564,6 +684,7 @@ void tokenize(const char *input, Token *tokens, int *token_count) {
                 add_char_to_word(&current_token, c, &word_len);
                 i++;
             }
+
         } else if (state == STATE_IN_SINGLE_QUOTE) {
             /*
              * POSIX: inside single quotes, NO characters are special —

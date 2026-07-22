@@ -95,6 +95,22 @@ static int apply_redirections(Command *cmd)
         sys_close(fd);
     }
 
+    /* fd-duplication redirects: N>&M  and  N<&M */
+    if (cmd->dup_out_src >= 0)
+    {
+        if (cmd->dup_out_dst == -2)
+            sys_close(cmd->dup_out_src);           /* N>&- : close fd */
+        else if (cmd->dup_out_dst >= 0)
+            sys_dup2(cmd->dup_out_dst, cmd->dup_out_src); /* N>&M */
+    }
+    if (cmd->dup_in_src >= 0)
+    {
+        if (cmd->dup_in_dst == -2)
+            sys_close(cmd->dup_in_src);            /* N<&- : close fd */
+        else if (cmd->dup_in_dst >= 0)
+            sys_dup2(cmd->dup_in_dst, cmd->dup_in_src);  /* N<&M */
+    }
+
     return 0;
 }
 
@@ -391,17 +407,21 @@ int execute_pipeline(Pipeline *pipeline)
             cmd_str
         );
 
-        write_str(1, "[");
-        print_long(1, (long)jnum);
-        write_str(1, "] ");
-        print_long(1, pipeline_pgid);
-        write_str(1, "\n");
-
         /*
-         * Phase 5: POSIX XBD 2.8.2 — "If a pipeline is run in the
-         * background, the exit status is 0."
-         * g_last_status = 0 so that $? after "cmd &" is always 0.
+         * Only print "[N] PID" when the shell is interactive (stdin is a tty).
+         * POSIX XBD 2.9.3.1: async notification messages are only required for
+         * interactive shells.  Printing them in script/pipe mode corrupts the
+         * captured stdout of the calling test and breaks compliance checks.
          */
+        if (g_interactive)
+        {
+            write_str(1, "[");
+            print_long(1, (long)jnum);
+            write_str(1, "] ");
+            print_long(1, pipeline_pgid);
+            write_str(1, "\n");
+        }
+
         g_last_status = 0;
         return 0;
     }
@@ -476,6 +496,10 @@ int execute_pipeline(Pipeline *pipeline)
     }
 
     g_last_status = exit_code;
+
+    /* Invert exit status when pipeline was prefixed with '!' */
+    if (pipeline->negate)
+        g_last_status = (g_last_status == 0) ? 1 : 0;
 
     /* ── Handle stopped foreground job ──────────────────────────────── */
     if (all_stopped)

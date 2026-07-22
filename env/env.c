@@ -38,6 +38,32 @@ char **g_environ = 0;
  */
 int g_last_status = 0;
 
+/*
+ * g_interactive
+ *
+ * Set to 1 in shell_main() only when the shell is attached to a terminal.
+ * 0 in -c mode and script-file mode.
+ */
+int g_interactive = 0;
+
+/*===========================================================================
+ Environment overlay table
+
+ Purpose:
+   The kernel envp array (g_environ) is read-only.  To support export and
+   unset builtins, we maintain a small static overlay of up to 64 entries.
+   env_get() checks the overlay first; env_set() writes here.
+
+ Format: each entry is a null-terminated "NAME=value" string in a fixed
+   256-byte slot.  A leading '\0' in slot 0 means the slot is empty.
+   A leading '=' means the variable is marked as unset (env_unset).
+===========================================================================*/
+#define ENV_OVERLAY_MAX   64
+#define ENV_OVERLAY_SLOT  256
+
+static char g_env_overlay[ENV_OVERLAY_MAX][ENV_OVERLAY_SLOT];
+static int  g_env_overlay_count = 0;
+
 /*===========================================================================
  env_get
 ===========================================================================*/
@@ -64,37 +90,114 @@ const char *env_get(
     const char *name
 )
 {
-    if (g_environ == 0)
-    {
-        return 0;
-    }
-
     long name_len = my_strlen(name);
 
-    for (int i = 0; g_environ[i] != 0; i++)
+    /* Check overlay first — overrides kernel envp */
+    for (int i = 0; i < g_env_overlay_count; i++)
     {
-        const char *entry = g_environ[i];
-
-        /*
-         * Check: first name_len chars match AND the next char is '='.
-         *
-         * my_strncmp returns 0 if the first name_len chars are equal.
-         * We must also confirm entry[name_len] == '=' to avoid matching
-         * "PATHSOMETHING" when searching for "PATH".
-         */
-        if (my_strncmp(entry, name, name_len) == 0
-            && entry[name_len] == '=')
+        const char *entry = g_env_overlay[i];
+        if (entry[0] == '\0') continue;   /* empty slot */
+        if (entry[0] == '=')              /* unset marker */
         {
-            /*
-             * Return a pointer directly into g_environ's string,
-             * starting after the '=' character.
-             *
-             * The caller must NOT write through this pointer — it points
-             * into the original envp passed to us by the kernel.
-             */
+            /* The variable name follows the '=' marker */
+            if (my_strncmp(entry + 1, name, name_len) == 0
+                && entry[1 + name_len] == '\0')
+                return 0;   /* explicitly unset */
+        }
+        else if (my_strncmp(entry, name, name_len) == 0
+                 && entry[name_len] == '=')
+        {
             return entry + name_len + 1;
         }
     }
 
-    return 0;   /* not found */
+    /* Fall through to kernel envp */
+    if (g_environ == 0) return 0;
+
+    for (int i = 0; g_environ[i] != 0; i++)
+    {
+        const char *entry = g_environ[i];
+        if (my_strncmp(entry, name, name_len) == 0
+            && entry[name_len] == '=')
+        {
+            return entry + name_len + 1;
+        }
+    }
+
+    return 0;
+}
+
+/*===========================================================================
+ env_set — write or update a variable in the overlay table
+===========================================================================*/
+int env_set(const char *name, const char *value)
+{
+    long name_len  = my_strlen(name);
+    long value_len = my_strlen(value);
+
+    /* If total length won't fit in a slot, skip */
+    if (name_len + 1 + value_len + 1 > ENV_OVERLAY_SLOT)
+        return -1;
+
+    /* Look for an existing entry to update */
+    for (int i = 0; i < g_env_overlay_count; i++)
+    {
+        char *entry = g_env_overlay[i];
+        if (entry[0] == '\0') continue;
+        /* Match NAME= or =NAME (unset marker) */
+        const char *cmp = (entry[0] == '=') ? entry + 1 : entry;
+        if (my_strncmp(cmp, name, name_len) == 0
+            && (cmp[name_len] == '=' || cmp[name_len] == '\0'))
+        {
+            /* Overwrite in place */
+            int pos = 0;
+            for (int k = 0; k < name_len; k++) entry[pos++] = name[k];
+            entry[pos++] = '=';
+            for (int k = 0; k < value_len; k++) entry[pos++] = value[k];
+            entry[pos] = '\0';
+            return 0;
+        }
+    }
+
+    /* New entry */
+    if (g_env_overlay_count >= ENV_OVERLAY_MAX) return -1;
+    char *slot = g_env_overlay[g_env_overlay_count++];
+    int pos = 0;
+    for (int k = 0; k < name_len;  k++) slot[pos++] = name[k];
+    slot[pos++] = '=';
+    for (int k = 0; k < value_len; k++) slot[pos++] = value[k];
+    slot[pos] = '\0';
+    return 0;
+}
+
+/*===========================================================================
+ env_unset — mark a variable as explicitly unset in the overlay
+===========================================================================*/
+void env_unset(const char *name)
+{
+    long name_len = my_strlen(name);
+
+    /* Update existing overlay entry to unset marker */
+    for (int i = 0; i < g_env_overlay_count; i++)
+    {
+        char *entry = g_env_overlay[i];
+        if (entry[0] == '\0') continue;
+        const char *cmp = (entry[0] == '=') ? entry + 1 : entry;
+        if (my_strncmp(cmp, name, name_len) == 0
+            && (cmp[name_len] == '=' || cmp[name_len] == '\0'))
+        {
+            /* Mark as unset: prefix '=' then name */
+            entry[0] = '=';
+            for (int k = 0; k < name_len; k++) entry[1 + k] = name[k];
+            entry[1 + name_len] = '\0';
+            return;
+        }
+    }
+
+    /* Not in overlay yet — add an unset marker */
+    if (g_env_overlay_count >= ENV_OVERLAY_MAX) return;
+    char *slot = g_env_overlay[g_env_overlay_count++];
+    slot[0] = '=';
+    for (int k = 0; k < name_len; k++) slot[1 + k] = name[k];
+    slot[1 + name_len] = '\0';
 }

@@ -7,6 +7,7 @@
 #include "pwd.h"
 #include "cd.h"
 #include "jobs_builtin.h"
+#include "misc_builtins.h"
 
 /*
 ===============================================================================
@@ -74,6 +75,32 @@ int execute_builtin(Command *cmd)
 
     if (my_strcmp(name, "bg") == 0)
         return builtin_bg(cmd);
+
+    /* ── POSIX mandatory builtins (compliance additions) ────────────── */
+
+    if (my_strcmp(name, "wait") == 0)
+        return builtin_wait(cmd);
+
+    if (my_strcmp(name, "eval") == 0)
+        return builtin_eval(cmd);
+
+    if (my_strcmp(name, ":")    == 0)
+        return builtin_colon();
+
+    if (my_strcmp(name, "true") == 0)
+        return builtin_true();
+
+    if (my_strcmp(name, "false") == 0)
+        return builtin_false();
+
+    if (my_strcmp(name, "export") == 0)
+        return builtin_export(cmd);
+
+    if (my_strcmp(name, "unset") == 0)
+        return builtin_unset(cmd);
+
+    if (my_strcmp(name, "read") == 0)
+        return builtin_read(cmd);
 
     return 0;
 }

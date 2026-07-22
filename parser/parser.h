@@ -18,7 +18,11 @@ typedef struct {
     char  input_file[MAX_FILENAME_LEN]; /* Filename for < redirect. Empty = none. */
     char  output_file[MAX_FILENAME_LEN];/* Filename for > or >> redirect. Empty = none. */
     int   append;                       /* 0 = overwrite (>), 1 = append (>>) */
-    int   is_builtin;                   /* 1 if cd, exit, pwd, jobs, fg, bg */
+    int   is_builtin;                   /* 1 if cd, exit, pwd, jobs, fg, bg, etc. */
+    int   dup_out_src;                  /* N>&M: dup fd N onto stdout; -1 = none */
+    int   dup_out_dst;                  /* destination fd for dup_out (usually 1) */
+    int   dup_in_src;                   /* N<&M: dup fd N onto stdin;  -1 = none */
+    int   dup_in_dst;                   /* destination fd for dup_in  (usually 0) */
 } Command;
 
 /*
@@ -28,6 +32,7 @@ typedef struct {
     Command commands[MAX_PIPELINE_DEPTH];
     int     count;                      /* Number of commands in this pipeline */
     int     background;                 /* 1 if & was present, 0 otherwise */
+    int     negate;                     /* 1 if ! prefix present (invert exit status) */
 } Pipeline;
 
 /*

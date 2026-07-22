@@ -16,11 +16,14 @@ typedef enum {
     TOKEN_REDIR_OUT,      /* >                                   */
     TOKEN_REDIR_APPEND,   /* >>                                  */
     TOKEN_REDIR_IN,       /* <                                   */
+    TOKEN_REDIR_DUP_OUT,  /* N>&M  — dup stdout (or fd N) to M  */
+    TOKEN_REDIR_DUP_IN,   /* N<&M  — dup stdin  (or fd N) to M  */
     TOKEN_BACKGROUND,     /* &  (single ampersand — background)  */
     TOKEN_AND,            /* && (AND list — run if prev exited 0)*/
     TOKEN_OR,             /* || (OR  list — run if prev failed)  */
     TOKEN_SEMICOLON,      /* ;                                   */
     TOKEN_NEWLINE,        /* \n                                  */
+    TOKEN_BANG,           /* !  pipeline negation keyword        */
     TOKEN_EOF             /* End of input                        */
 } TokenType;
 

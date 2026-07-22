@@ -22,6 +22,7 @@
 #include "../parser/tokenizer.h"
 #include "../parser/parser.h"
 #include "../builtins/builtins.h"
+#include "../builtins/misc_builtins.h"
 #include "../executor/executor.h"
 #include "../signals/signals.h"
 #include "../jobs/jobs.h"
@@ -85,16 +86,23 @@ static void run_one_pipeline(Pipeline *pipeline)
     if (pipeline->count == 1 && pipeline->commands[0].is_builtin)
     {
         Command *cmd = &pipeline->commands[0];
-        /*
-         * Fast path for builtins with no redirections.
-         * Redirected builtins (e.g. "echo hi > file") must go through
-         * execute_pipeline() so dup2() is set up before the builtin runs.
-         */
-        int has_redir = cmd->input_file[0] != '\0' || cmd->output_file[0] != '\0';
+        int has_redir = cmd->input_file[0] != '\0' || cmd->output_file[0] != '\0'
+                     || cmd->dup_out_src >= 0 || cmd->dup_in_src >= 0;
         if (!has_redir)
         {
-            execute_builtin(cmd);
+            /*
+             * Reset status to 0 BEFORE calling the builtin.
+             * Builtins that succeed silently (echo, pwd, cd) don't
+             * touch g_last_status; defaulting to 0 prevents a prior
+             * failed external command's 127 from leaking through.
+             * Builtins that can fail (false, wait, cd on ENOENT) will
+             * override g_last_status themselves.
+             */
             g_last_status = 0;
+            execute_builtin(cmd);
+            /* Apply ! negation after the builtin has set its own status */
+            if (pipeline->negate)
+                g_last_status = (g_last_status == 0) ? 1 : 0;
             return;
         }
     }
@@ -472,9 +480,11 @@ void shell_main(int argc, char **argv, char **envp)
      */
     if (c_script)
     {
+        /* non-interactive: g_interactive stays 0 */
         g_shell_pgid = sys_getpid();
         setup_shell_signals();
         init_job_table();
+        g_eval_fn = execute_line;
 
         /* Walk through the script one newline-delimited line at a time */
         char line_buf[MAX_INPUT];
@@ -565,6 +575,7 @@ void shell_main(int argc, char **argv, char **envp)
         g_shell_pgid = sys_getpid();
         setup_shell_signals();
         init_job_table();
+        g_eval_fn = execute_line;    /* non-interactive: g_interactive stays 0 */
 
         /*
          * Walk the buffer line-by-line, identical to -c mode.
@@ -648,6 +659,10 @@ void shell_main(int argc, char **argv, char **envp)
     /* ── Step 7: initialise job table ────────────────────────────────── */
     init_job_table();
 
+    /* ── Step 8: wire eval builtin ───────────────────────────────────── */
+    g_eval_fn    = execute_line;
+    g_interactive = 1;   /* stdin is a tty — interactive mode */
+
     char buffer[MAX_INPUT];
 
     while (1)
@@ -656,9 +671,12 @@ void shell_main(int argc, char **argv, char **envp)
         g_sigchld_flag = 0;
         reap_background_jobs();
 
-        /* ── Prompt ──────────────────────────────────────────────────── */
-        char prompt[] = "posixsh> ";
-        sys_write(1, prompt, my_strlen(prompt));
+        /* ── Prompt — only in interactive mode ──────────────────────── */
+        if (g_interactive)
+        {
+            char prompt[] = "posixsh> ";
+            sys_write(1, prompt, my_strlen(prompt));
+        }
 
         /* ── Read input ──────────────────────────────────────────────── */
         /*

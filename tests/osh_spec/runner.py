@@ -18,6 +18,7 @@ Usage:
 """
 import sys
 import os
+import shutil
 import subprocess
 import tempfile
 import argparse
@@ -141,6 +142,28 @@ def run_test_case(case, shell_bin):
 
     script_content = "".join(case.script_lines)
 
+    # Resolve shell binary to an absolute path.
+    # For explicit paths (./posixsh, /usr/bin/bash) use abspath.
+    # For bare names ('dash', 'bash') use shutil.which() so we get /bin/dash etc.
+    if shell_bin.startswith('./') or shell_bin.startswith('../') or os.path.isabs(shell_bin):
+        shell_abs = os.path.abspath(shell_bin)
+    else:
+        shell_abs = shutil.which(shell_bin) or shell_bin
+
+    # Determine project root (two levels up from this file: tests/osh_spec/)
+    script_dir   = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    bin_dir      = os.path.join(project_root, "bin")
+
+    # Build an env that prepends bin/ to PATH so argv.py and friends are found
+    test_env = os.environ.copy()
+    existing_path = test_env.get("PATH", "/usr/bin:/bin")
+    test_env["PATH"] = bin_dir + ":" + existing_path
+    # Inject SH so tests using `$SH -c '...'` get the shell under test
+    test_env["SH"] = shell_abs
+    # Some tests check OILS_TEST_* vars; default to empty to avoid OSH-specific skips
+    test_env.setdefault("OILS_TEST_SHELL", shell_abs)
+
     # Write script to a temp file so we test file-invocation (not -c),
     # which exercises the same code path posixsh normally uses.
     tf_fd, temp_path = tempfile.mkstemp(suffix=".sh", prefix="osh_spec_")
@@ -149,10 +172,11 @@ def run_test_case(case, shell_bin):
             tf.write(script_content)
 
         proc = subprocess.run(
-            [shell_bin, temp_path],
+            [shell_abs, temp_path],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=test_env
         )
         actual_stdout = proc.stdout
         actual_status = proc.returncode

@@ -23,6 +23,10 @@ static void init_command(Command *cmd)
     cmd->output_file[0] = '\0';
     cmd->append         = 0;
     cmd->is_builtin     = 0;
+    cmd->dup_out_src    = -1;
+    cmd->dup_out_dst    = -1;
+    cmd->dup_in_src     = -1;
+    cmd->dup_in_dst     = -1;
 
     for (int i = 0; i <= MAX_ARGS; i++) {
         cmd->argv[i] = NULL;
@@ -42,13 +46,23 @@ static void init_command(Command *cmd)
  */
 static int is_builtin_command(const char *name)
 {
-    if (my_strcmp(name, "cd")   == 0) return 1;
-    if (my_strcmp(name, "exit") == 0) return 1;
-    if (my_strcmp(name, "pwd")  == 0) return 1;
-    if (my_strcmp(name, "echo") == 0) return 1;  /* Phase 5: avoid fork+exec */
-    if (my_strcmp(name, "jobs") == 0) return 1;
-    if (my_strcmp(name, "fg")   == 0) return 1;
-    if (my_strcmp(name, "bg")   == 0) return 1;
+    if (my_strcmp(name, "cd")     == 0) return 1;
+    if (my_strcmp(name, "exit")   == 0) return 1;
+    if (my_strcmp(name, "pwd")    == 0) return 1;
+    if (my_strcmp(name, "echo")   == 0) return 1;
+    if (my_strcmp(name, "jobs")   == 0) return 1;
+    if (my_strcmp(name, "fg")     == 0) return 1;
+    if (my_strcmp(name, "bg")     == 0) return 1;
+    /* POSIX mandatory builtins added for compliance */
+    if (my_strcmp(name, "wait")   == 0) return 1;
+    if (my_strcmp(name, "eval")   == 0) return 1;
+    if (my_strcmp(name, ":")      == 0) return 1;
+    if (my_strcmp(name, "true")   == 0) return 1;
+    if (my_strcmp(name, "false")  == 0) return 1;
+    if (my_strcmp(name, "export") == 0) return 1;
+    if (my_strcmp(name, "unset")  == 0) return 1;
+    if (my_strcmp(name, "read")   == 0) return 1;
+    if (my_strcmp(name, ".")      == 0) return 1;  /* source */
     return 0;
 }
 
@@ -69,6 +83,7 @@ int parse(Token *tokens, int token_count, Pipeline *pipeline)
 {
     pipeline->count      = 0;
     pipeline->background = 0;
+    pipeline->negate     = 0;
 
     Command current_cmd;
     init_command(&current_cmd);
@@ -119,19 +134,51 @@ int parse(Token *tokens, int token_count, Pipeline *pipeline)
                 || t.type == TOKEN_REDIR_APPEND
                 || t.type == TOKEN_REDIR_IN) {
             /*
-             * Redirection token must be immediately followed by a filename word.
-             * The filename is stored in the Command struct and used by dup2()
-             * in Phase 3 to redirect file descriptors before execve().
+             * File redirect: must be followed by a filename word.
              */
-            i++; /* Advance to the filename token */
+            i++;
             if (i >= token_count || tokens[i].type != TOKEN_WORD) {
-                return -1; /* Syntax error: missing filename after redirect operator */
+                return -1;
             }
             if (t.type == TOKEN_REDIR_IN) {
                 my_strcpy(current_cmd.input_file, tokens[i].value);
             } else {
                 my_strcpy(current_cmd.output_file, tokens[i].value);
                 current_cmd.append = (t.type == TOKEN_REDIR_APPEND) ? 1 : 0;
+            }
+            i++;
+
+        } else if (t.type == TOKEN_REDIR_DUP_OUT
+                || t.type == TOKEN_REDIR_DUP_IN) {
+            /*
+             * fd-dup redirect: value is encoded as "src>dst" or "src<dst".
+             * Parse the two integers from the value string.
+             */
+            const char *v = tokens[i].value;
+            /* src is the first digit(s) */
+            int src = 0;
+            int k = 0;
+            while (v[k] >= '0' && v[k] <= '9') src = src * 10 + (v[k++] - '0');
+            k++; /* skip '>' or '<' */
+            if (v[k] == '-') {
+                /* N>&- closes fd src */
+                if (t.type == TOKEN_REDIR_DUP_OUT) {
+                    current_cmd.dup_out_src = src;
+                    current_cmd.dup_out_dst = -2; /* -2 = close */
+                } else {
+                    current_cmd.dup_in_src  = src;
+                    current_cmd.dup_in_dst  = -2;
+                }
+            } else {
+                int dst = 0;
+                while (v[k] >= '0' && v[k] <= '9') dst = dst * 10 + (v[k++] - '0');
+                if (t.type == TOKEN_REDIR_DUP_OUT) {
+                    current_cmd.dup_out_src = src; /* fd to redirect FROM (usually 1) */
+                    current_cmd.dup_out_dst = dst; /* fd to redirect TO   */
+                } else {
+                    current_cmd.dup_in_src  = src;
+                    current_cmd.dup_in_dst  = dst;
+                }
             }
             i++;
 
@@ -197,6 +244,16 @@ int parse(Token *tokens, int token_count, Pipeline *pipeline)
                 return -1; /* Syntax error: trailing pipe e.g. "ls |" */
             }
             break;
+
+        } else if (t.type == TOKEN_BANG) {
+            /*
+             * '!' pipeline negation keyword (POSIX XBD 2.9.2).
+             * Only valid at the start of a pipeline (before any command).
+             * Sets pipeline->negate; executor flips the exit status.
+             */
+            if (pipeline->count == 0 && current_cmd.argc == 0)
+                pipeline->negate = 1;
+            i++;
 
         } else {
             i++; /* Unknown token type — skip safely */

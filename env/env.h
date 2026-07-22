@@ -66,6 +66,33 @@ extern char **g_environ;
 extern int g_last_status;
 
 /*
+ * g_interactive
+ *
+ * 1 when the shell is running interactively (stdin is a tty).
+ * 0 in script file mode or -c mode.
+ * Used to suppress the prompt and "[N] PID" background job messages
+ * in non-interactive contexts (e.g. compliance test runner).
+ */
+extern int g_interactive;
+
+/*
+ * env_set(name, value)
+ *
+ * Sets or updates an environment variable in the shell's overlay table.
+ * Subsequent env_get() calls will return the new value.
+ * Returns 0 on success, -1 if the overlay table is full.
+ */
+int env_set(const char *name, const char *value);
+
+/*
+ * env_unset(name)
+ *
+ * Removes a variable from the overlay table (and marks it absent).
+ * After env_unset(), env_get() returns NULL for that name.
+ */
+void env_unset(const char *name);
+
+/*
 ===============================================================================
 FUNCTION: env_get
 

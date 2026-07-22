@@ -3,6 +3,7 @@
 #include "jobs.h"
 #include "../include/wrappers.h"
 #include "../utils/string.h"
+#include "../env/env.h"   /* g_interactive */
 
 /*===========================================================================
  Global job table
@@ -214,7 +215,10 @@ void reap_background_jobs(void)
              * For Phase 4, marking on first exit is sufficient.
              */
             job->state = JOB_DONE;
-            print_job_line(job, 1);
+            /* Only report "Done" in interactive mode — in script/pipe mode
+             * it would corrupt the captured stdout of the calling process. */
+            if (g_interactive)
+                print_job_line(job, 1);
             free_job(job);
         }
     }
