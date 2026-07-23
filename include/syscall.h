@@ -34,15 +34,15 @@ Educational objective:
 
 #if defined(__x86_64__)
 
-#include "../arch/x86_64/arch.h"
+#include "../arch/x86_64/arch.h" // IWYU pragma: export
 
 #elif defined(__aarch64__)
 
-#include "../arch/arm64/arch.h"
+#include "../arch/arm64/arch.h"  // IWYU pragma: export
 
 #elif defined(__riscv)
 
-#include "../arch/riscv64/arch.h"
+#include "../arch/riscv64/arch.h" // IWYU pragma: export
 
 #else
 

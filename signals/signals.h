@@ -20,9 +20,6 @@ Contents:
 ===============================================================================
 */
 
-#include "../include/constants.h"
-#include "../include/syscall.h"
-
 /*===========================================================================
  kernel_sigset_t / kernel_sigaction_t
 
@@ -43,11 +40,9 @@ Contents:
  * We set it to 0 in our sigaction structs, meaning "do not block any
  * additional signals while this handler is running."
  */
-typedef struct
-{
-    unsigned long sig[1];           /* 64 signals in one 64-bit word         */
+typedef struct {
+  unsigned long sig[1]; /* 64 signals in one 64-bit word         */
 } kernel_sigset_t;
-
 
 /*
  * kernel_sigaction_t
@@ -64,14 +59,12 @@ typedef struct
  *   sa_mask      : Additional signals to block while handler runs.
  *                  We set this to 0 (block nothing extra).
  */
-typedef struct
-{
-    void           (*sa_handler)(int);
-    unsigned long    sa_flags;
-    void           (*sa_restorer)(void);
-    kernel_sigset_t  sa_mask;
+typedef struct {
+  void (*sa_handler)(int);
+  unsigned long sa_flags;
+  void (*sa_restorer)(void);
+  kernel_sigset_t sa_mask;
 } kernel_sigaction_t;
-
 
 /*===========================================================================
  Global state (defined in signals.c, used throughout the shell)
@@ -101,7 +94,6 @@ extern volatile int g_sigchld_flag;
  *   sys_tcsetpgrp(STDIN_FILENO, g_shell_pgid)
  */
 extern long g_shell_pgid;
-
 
 /*===========================================================================
  Function declarations
@@ -141,4 +133,4 @@ void setup_shell_signals(void);
  */
 void reset_child_signals(void);
 
-#endif  /* SIGNALS_H */
+#endif /* SIGNALS_H */
