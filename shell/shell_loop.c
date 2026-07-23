@@ -348,7 +348,71 @@ static int execute_line(char *buf)
                 return -1;
             }
 
+            /*
+             * Standalone variable assignment: NAME=VALUE
+             *
+             * POSIX XBD 2.9.1: "If a simple command consists solely of
+             * variable assignments, the variable assignments shall affect
+             * the current execution environment."
+             *
+             * Detection: single-command pipeline, one TOKEN_WORD whose
+             * value contains '=' with a valid identifier before it, and
+             * no redirections.  We call env_set() and skip execution.
+             *
+             * This is the minimal change required to make $VAR tests work:
+             * without it, FOO=bar is treated as a command and FOO is never
+             * set in the shell's environment, so all expansion tests fail.
+             */
+            if (pipeline.count == 1)
+            {
+                Command *cmd = &pipeline.commands[0];
+                /* Only applies when there is exactly one argument and no
+                 * redirections — this is a pure assignment, not a prefix. */
+                if (cmd->argc == 1 && !cmd->is_builtin
+                    && cmd->input_file[0]  == '\0'
+                    && cmd->output_file[0] == '\0'
+                    && cmd->dup_out_src < 0
+                    && cmd->dup_in_src  < 0)
+                {
+                    const char *word = cmd->argv[0];
+                    /* Find '=' and validate the name before it */
+                    int eq = -1;
+                    for (int k = 0; word[k] != '\0'; k++)
+                    {
+                        if (word[k] == '=') { eq = k; break; }
+                    }
+                    if (eq > 0)
+                    {
+                        /* Check that name part is a valid identifier */
+                        int valid = 1;
+                        for (int k = 0; k < eq && valid; k++)
+                        {
+                            char c = word[k];
+                            int is_first = (k == 0);
+                            if (is_first)
+                                valid = (c >= 'a' && c <= 'z') ||
+                                        (c >= 'A' && c <= 'Z') || c == '_';
+                            else
+                                valid = (c >= 'a' && c <= 'z') ||
+                                        (c >= 'A' && c <= 'Z') ||
+                                        (c >= '0' && c <= '9') || c == '_';
+                        }
+                        if (valid)
+                        {
+                            char name[64];
+                            int  nlen = (eq < 63) ? eq : 63;
+                            for (int k = 0; k < nlen; k++) name[k] = word[k];
+                            name[nlen] = '\0';
+                            env_set(name, word + eq + 1);
+                            g_last_status = 0;
+                            goto next_segment;
+                        }
+                    }
+                }
+            }
+
             run_one_pipeline(&pipeline);
+            next_segment:;
         }
 
         if (sep == SEP_NONE) break;

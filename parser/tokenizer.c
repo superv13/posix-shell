@@ -319,6 +319,57 @@ static int try_dollar_expansion(
     {
         int j = *i + 2;     /* position of first char inside '{}' */
 
+        /*
+         * ${#VAR} — variable string length (POSIX XBD 2.6.2).
+         *
+         * When '#' immediately follows '{', treat the rest as the
+         * variable name, look it up, and emit the decimal length of
+         * its value.  Unset variable → length 0.
+         */
+        if (input[j] == '#')
+        {
+            int name_start = j + 1;  /* char after '#' */
+            int k = name_start;
+
+            /* Name must start with a letter or underscore */
+            if (!((input[k] >= 'a' && input[k] <= 'z') ||
+                  (input[k] >= 'A' && input[k] <= 'Z') ||
+                   input[k] == '_'))
+            {
+                return 0;   /* not a valid ${#...} — treat '$' as literal */
+            }
+
+            /* Scan to end of name */
+            while (is_var_char(input[k]))
+                k++;
+
+            /* Expect closing '}' */
+            if (input[k] != '}')
+                return 0;
+
+            /* Extract name */
+            int  name_len = k - name_start;
+            char name_buf[64];
+            if (name_len >= (int)sizeof(name_buf))
+                name_len = (int)sizeof(name_buf) - 1;
+            for (int m = 0; m < name_len; m++)
+                name_buf[m] = input[name_start + m];
+            name_buf[name_len] = '\0';
+
+            /* Compute length of the variable's value */
+            const char *val = env_get(name_buf);
+            long vlen = 0;
+            if (val != 0)
+            {
+                const char *p = val;
+                while (*p++) vlen++;
+            }
+
+            expand_integer(tok, word_len, vlen);
+            *i = k + 1;     /* skip past '$', '{', '#', name, '}' */
+            return 1;
+        }
+
         /* Variable name must start with a letter or underscore */
         if (!((input[j] >= 'a' && input[j] <= 'z') ||
               (input[j] >= 'A' && input[j] <= 'Z') ||
